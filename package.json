@@ -1,0 +1,47 @@
+{
+	"name": "pi-heed",
+	"version": "0.1.0",
+	"description": "Evidence-backed course correction for the pi coding agent: keeps the agent on the constraints you set, powered by TypeSafe Jev.",
+	"type": "module",
+	"license": "MIT",
+	"author": "Nyarlathoteppppp",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Nyarlathoteppppp/pi-heed.git"
+	},
+	"keywords": [
+		"pi-package",
+		"pi",
+		"pi-coding-agent",
+		"extension",
+		"jev",
+		"typesafe",
+		"guardrails"
+	],
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"files": [
+		"src",
+		"README.md",
+		"LICENSE"
+	],
+	"engines": {
+		"node": ">=22.18"
+	},
+	"scripts": {
+		"test": "node --test test/*.test.ts",
+		"typecheck": "tsc --noEmit",
+		"smoke:jev": "node scripts/smoke-jev.ts"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": ">=0.85.1"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "0.85.1",
+		"@types/node": "^24.0.0",
+		"typescript": "^5.9.0"
+	}
+}
