@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { classify } from "../src/actions.ts";
-import { pathMatches } from "../src/gate.ts";
-import { ConstraintLedger } from "../src/constraints.ts";
+import { pathMatches, PolicyEngine } from "../src/policy.ts";
+import { parseMessage } from "../src/rules.ts";
+import { kinds as kindsOf } from "./harness.ts";
 import { JevJudge } from "../src/judge.ts";
 import { errorSignature, RepeatTracker } from "../src/repeat.ts";
 
-const kinds = (text: string) => {
-	const l = new ConstraintLedger();
-	l.ingest(text);
-	return l.active().map((c) => c.kind);
-};
+/** Feeds messages through the parser into a fresh engine, like the extension does. */
+function ledger(...messages: string[]): PolicyEngine {
+	const e = new PolicyEngine();
+	messages.forEach((m, i) => parseMessage(m, i).forEach((op) => e.apply(op)));
+	return e;
+}
+const kinds = (text: string) => kindsOf(ledger(text));
 
 describe("constraint extraction", () => {
 	const cases: Array<[string, string[]]> = [
@@ -31,25 +34,17 @@ describe("constraint extraction", () => {
 	for (const [text, expected] of cases) it(text, () => assert.deepEqual(kinds(text), expected));
 
 	it("revokes read-only, keeps a later constraint in the same message", () => {
-		const l = new ConstraintLedger();
-		l.ingest("Don't modify any files yet.");
-		const r = l.ingest("OK, you can edit now. But don't touch the tests.");
-		assert.equal(r.revoked.length, 1);
-		assert.deepEqual(l.active().map((c) => c.kind), ["no_tests"]);
+		const l = ledger("Don't modify any files yet.", "OK, you can edit now. But don't touch the tests.");
+		assert.equal(l.history().length, 1);
+		assert.deepEqual(kindsOf(l), ["no_tests"]);
 	});
 
 	it("does not treat 不可以改 as permission", () => {
-		const l = new ConstraintLedger();
-		l.ingest("不要改代码");
-		l.ingest("还是不可以改");
-		assert.deepEqual(l.active().map((c) => c.kind), ["read_only"]);
+		assert.deepEqual(kindsOf(ledger("不要改代码", "还是不可以改")), ["read_only"]);
 	});
 
 	it("中文撤销", () => {
-		const l = new ConstraintLedger();
-		l.ingest("只读，先别改文件");
-		l.ingest("好，现在可以改了");
-		assert.deepEqual(l.active(), []);
+		assert.deepEqual(ledger("只读，先别改文件", "好，现在可以改了").active(), []);
 	});
 });
 
@@ -134,5 +129,12 @@ describe("pathMatches", () => {
 		assert.equal(pathMatches("src/legacy/x.ts", "src/legacy/"), true);
 		assert.equal(pathMatches("lib/src/legacy/x.ts", "src/legacy"), true);
 		assert.equal(pathMatches("src/legacyish.ts", "src/legacy"), false);
+	});
+});
+
+describe("rules: paths at the end of a sentence", () => {
+	it("drops trailing punctuation", () => {
+		const ops = parseMessage("For this fix only, you may touch src/auth/token.ts.", 0);
+		assert.equal((ops[0] as any).spec.resource, "src/auth/token.ts");
 	});
 });

@@ -1,7 +1,7 @@
 // Live check of the semantic gate against Jev. Needs TYPESAFE_API_KEY or OPENROUTER_API_KEY
 // (directly or via PI_HEED_ENV_FILE). Costs a few cents' thousandths.
 import { classify } from "../src/actions.ts";
-import { ConstraintLedger } from "../src/constraints.ts";
+import { PolicyEngine } from "../src/policy.ts";
 import { judgeCheck } from "../src/gate.ts";
 import { JevJudge, resolveTransport } from "../src/judge.ts";
 
@@ -23,9 +23,10 @@ const cases: Array<{ constraint: string; tool: string; input: Record<string, unk
 
 let agree = 0;
 for (const c of cases) {
-	const ledger = new ConstraintLedger();
-	ledger.ingest(c.constraint);
-	const { verdict, error, ms } = await judgeCheck(judge, ledger.active(), classify(c.tool, c.input), c.input, 5000);
+	// Checks the free-text (custom) path directly, whatever the rules would have made of the sentence.
+	const engine = new PolicyEngine();
+	engine.apply({ op: "add", spec: { effect: "DENY", action: "custom", resource: c.constraint, scope: "session", sourceQuote: c.constraint, by: "command", at: 0 } });
+	const { verdict, error, ms } = await judgeCheck(judge, engine.customDenies(), classify(c.tool, c.input), c.input, 5000);
 	const got = verdict?.decision ?? `error:${error}`;
 	if (got === c.expect) agree++;
 	console.log(`${got === c.expect ? "ok " : "BAD"} ${String(ms).padStart(4)}ms  ${got.padEnd(12)} p=${verdict?.probability.toFixed(2) ?? "-"} conf=${verdict?.confidence.toFixed(2) ?? "-"}  | ${c.constraint} → ${JSON.stringify(c.input).slice(0, 70)}`);

@@ -1,5 +1,20 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createHeed, type HeedOptions } from "../src/index.ts";
+import type { Policy, PolicyEngine } from "../src/policy.ts";
+
+/** v0.2-style names for active restrictive policies, so older assertions stay readable. */
+export function kindOf(p: Policy): string {
+	if (p.action === "custom") return "custom";
+	if (p.action === "install_deps") return p.effect === "DENY" ? "no_deps" : `${p.effect}:deps`;
+	if (p.action === "git_push") return p.effect === "DENY" ? "no_push" : `${p.effect}:push`;
+	if (p.action === "git_commit") return `${p.effect}:commit`;
+	if (p.effect !== "DENY") return `${p.effect}:${p.resource}`;
+	return p.resource === "*" ? "read_only" : p.resource === "tests" ? "no_tests" : "protect_path";
+}
+
+export function kinds(engine: PolicyEngine): string[] {
+	return engine.active().map(kindOf);
+}
 
 type Handler = (event: any, ctx: any) => any;
 

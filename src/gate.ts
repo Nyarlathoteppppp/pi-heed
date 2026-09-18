@@ -1,50 +1,45 @@
-import { TEST_PATH, truncate } from "./actions.ts";
+import { truncate } from "./actions.ts";
 import { type ChoiceAnswer, type ChoiceQuestion, ask, type Judge } from "./judge.ts";
-import type { Constraint, ToolAction, Verdict } from "./types.ts";
+import type { Policy, Resolution } from "./policy.ts";
+import type { ToolAction, Verdict } from "./types.ts";
 
-function quoteOf(c: Constraint): string {
-	return `${c.id} "${truncate(c.quote, 160)}"`;
+function quoteOf(p: Policy): string {
+	return `${p.id} "${truncate(p.sourceQuote, 160)}"`;
 }
 
-function violation(c: Constraint, action: ToolAction, why: string, remedy: string): Verdict {
+/** Evidence-carrying verdict for a restrictive policy that decided a call. */
+export function policyVerdict(r: Resolution, action: ToolAction): Verdict | undefined {
+	const p = r.policy;
+	if (!p) return undefined;
+	const on = r.target ? ` (${r.target})` : "";
+	let why: string;
+	let remedy: string;
+	switch (p.effect) {
+		case "REQUIRE_CONFIRMATION":
+			why = "needs the user's explicit confirmation first";
+			remedy = "Ask the user before doing this.";
+			break;
+		case "REQUIRE_BEFORE":
+			why = `requires ${p.prerequisite} to pass first, with no file changes since`;
+			remedy = `Run the ${p.prerequisite} first, then retry.`;
+			break;
+		default:
+			why = p.action === "modify" ? `modify ${p.resource === "*" ? "files or external state" : p.resource === "tests" ? "test files" : p.resource}${on}` : `${p.action.replace("_", " ")}`;
+			why = `is forbidden: it would ${why}`;
+			remedy =
+				p.resource === "tests"
+					? "Leave the tests unchanged; fix the code under test instead, or ask the user."
+					: "Do not apply it; describe the intended change instead, or ask the user to lift the policy.";
+	}
+	const exceptions = p.exceptions.length ? ` Exceptions granted: ${p.exceptions.join(", ")}.` : "";
 	return {
 		decision: "violates",
 		probability: 1,
 		confidence: 1,
 		by: "rule",
-		constraintId: c.id,
-		evidence: `User constraint ${quoteOf(c)}. Pending call: ${action.summary}. It would ${why}. ${remedy}`,
+		constraintId: p.id,
+		evidence: `User policy ${quoteOf(p)}. Pending call: ${action.summary}. It ${why}.${exceptions} ${remedy}`,
 	};
-}
-
-/** True when `path` is `frag` or ends with it on a path-segment boundary ("a.ts" matches "src/a.ts", not "data.ts"). */
-export function pathMatches(path: string, frag: string): boolean {
-	const p = path.replace(/^\.\//, "");
-	const f = frag.replace(/^\.\//, "").replace(/\/$/, "");
-	return p === f || p.endsWith(`/${f}`) || p.startsWith(`${f}/`) || p.includes(`/${f}/`);
-}
-
-/** Deterministic checks for the constraint kinds rules can decide on their own. */
-export function ruleCheck(constraints: Constraint[], action: ToolAction): Verdict | undefined {
-	if (!action.mutates) return undefined;
-	for (const c of constraints) {
-		switch (c.kind) {
-			case "read_only":
-				return violation(c, action, "change files or external state", "Do not apply it; describe the intended change instead, or ask the user to lift the constraint.");
-			case "no_deps":
-				if (action.installsDeps) return violation(c, action, "add a dependency", "Solve it with existing dependencies, or ask the user first.");
-				break;
-			case "no_tests":
-				if (action.paths.some((p) => TEST_PATH.test(p))) return violation(c, action, "modify test files", "Leave the tests unchanged; fix the code under test instead, or ask the user.");
-				break;
-			case "protect_path": {
-				const hit = action.paths.find((p) => c.paths?.some((frag) => pathMatches(p, frag)));
-				if (hit) return violation(c, action, `modify ${hit}`, "Leave that path unchanged, or ask the user.");
-				break;
-			}
-		}
-	}
-	return undefined;
 }
 
 export const CUSTOM_QUESTION: ChoiceQuestion = {
@@ -79,19 +74,18 @@ function probOf(a: ChoiceAnswer): number {
 	return a.probabilities[a.choice] ?? 0;
 }
 
-/** Semantic check of free-text ("custom") constraints. Returns no verdict on any failure. */
+/** Semantic check of free-text (custom) prohibitions. Returns no verdict on any failure. */
 export async function judgeCheck(
 	judge: Judge | undefined,
-	constraints: Constraint[],
+	custom: Policy[],
 	action: ToolAction,
 	input: Record<string, unknown>,
 	timeoutMs: number,
 	signal?: AbortSignal,
 ): Promise<JudgedCheck> {
-	const custom = constraints.filter((c) => c.kind === "custom");
 	if (custom.length === 0 || !(action.mutates || action.effect === "unknown")) return { ms: 0 };
 	const state = {
-		user_constraints: custom.map((c) => ({ id: c.id, text: c.quote })),
+		user_constraints: custom.map((c) => ({ id: c.id, text: c.resource })),
 		pending_tool_call: { tool: action.toolName, summary: action.summary, input: truncate(JSON.stringify(input), 1500) },
 	};
 	const { answers, error, ms } = await ask(judge, state, { q: CUSTOM_QUESTION }, timeoutMs, signal);
@@ -106,7 +100,7 @@ export async function judgeCheck(
 			confidence: answer.confidence,
 			by: "jev",
 			evidence:
-				`User constraints ${custom.map(quoteOf).join("; ")}. Pending call: ${action.summary}. ` +
+				`User policies ${custom.map(quoteOf).join("; ")}. Pending call: ${action.summary}. ` +
 				`Judge: ${decision} (p=${probOf(answer).toFixed(2)}, confidence=${answer.confidence.toFixed(2)}). ` +
 				"If the call is needed, explain why it does not conflict, or ask the user.",
 		},
@@ -121,21 +115,21 @@ export interface ExceptionCheck {
 }
 
 /**
- * Second opinion before a rule-based block: did the user later carve out an exception for exactly this
- * action ("I changed my mind for notes.txt")? Only a confident "permitted" lets the call through.
+ * Second opinion before a rule-based block: did the user carve out an exception for exactly this
+ * action that the rules didn't parse? Only a confident "permitted" lets the call through.
  */
 export async function exceptionCheck(
 	judge: Judge | undefined,
-	constraint: Constraint,
-	laterUserMessages: string[],
+	policy: Policy,
+	messagesSince: string[],
 	action: ToolAction,
 	timeoutMs: number,
 	signal?: AbortSignal,
 ): Promise<ExceptionCheck> {
-	if (!judge || laterUserMessages.length === 0) return { permitted: false, ms: 0 };
+	if (!judge || messagesSince.length === 0) return { permitted: false, ms: 0 };
 	const state = {
-		constraint: constraint.quote,
-		user_messages_since_constraint: laterUserMessages.map((m) => truncate(m, 600)),
+		constraint: policy.sourceQuote,
+		user_messages_since_constraint: messagesSince.map((m) => truncate(m, 600)),
 		pending_tool_call: action.summary,
 	};
 	const { answers, error, ms } = await ask(judge, state, { q: EXCEPTION_QUESTION }, timeoutMs, signal);

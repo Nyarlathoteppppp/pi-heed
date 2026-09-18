@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { Answer, ChoiceAnswer, Judge, Question } from "../src/judge.ts";
-import { type FakePi, setup, toolCall } from "./harness.ts";
+import { type FakePi, kindOf, kinds, setup, toolCall } from "./harness.ts";
 
 const answer = (choice: string, p = 0.97, confidence = 0.9): ChoiceAnswer => ({ type: "choice", choice, probabilities: { [choice]: p }, confidence });
 
@@ -190,7 +190,7 @@ describe("session state", () => {
 		pi.entries = first.pi.entries;
 		await pi.emit("session_start", { reason: "resume" });
 		assert.equal(heed.config.mode, "enforce");
-		assert.deepEqual(heed.ledger.active().map((c) => c.kind), ["read_only", "custom"]);
+		assert.deepEqual(kinds(heed.engine), ["read_only", "custom"]);
 	});
 
 	it("/heed drop and label", async () => {
@@ -200,8 +200,8 @@ describe("session state", () => {
 		await pi.flush();
 		await pi.command("/heed label bad legit edit");
 		assert.equal(pi.entries.at(-1)!.customType, "heed-label");
-		await pi.command("/heed drop c1");
-		assert.deepEqual(heed.ledger.active(), []);
+		await pi.command("/heed drop p1");
+		assert.deepEqual(heed.engine.active(), []);
 	});
 });
 
@@ -226,16 +226,16 @@ describe("v0.2: exceptions, understanding, speculation", () => {
 	it("background understanding adds a paraphrased constraint and drops a fake one", async () => {
 		const judge = fullJudge((k) => (k === "set_read_only" ? { type: "noul", noul: 0.95 } : k.startsWith("real_") ? { type: "noul", noul: 0.02 } : { type: "noul", noul: 0.01 }));
 		const { pi, heed } = track(setup({ config: { mode: "enforce" }, judge }));
-		await pi.user("只看不改。Don't forget to add tests later.");
+		await pi.user("Keep everything exactly as it is while you look around. Don't forget to add tests later.");
 		await heed.settled();
-		assert.deepEqual(heed.ledger.active().map((c) => [c.kind, c.by]), [["read_only", "jev"]]);
+		assert.deepEqual(heed.engine.active().map((p) => [kindOf(p), p.provenance.by]), [["read_only", "jev"]]);
 		assert.equal((await pi.emit("tool_call", toolCall("edit", { path: "a.ts" })))?.block, true);
 
 		// persisted: a fresh instance rebuilds the Jev-derived state without calling Jev
 		const again = setup({ judge: null });
 		again.pi.entries = pi.entries;
 		await again.pi.emit("session_start", { reason: "resume" });
-		assert.deepEqual(again.heed.ledger.active().map((c) => c.kind), ["read_only"]);
+		assert.deepEqual(kinds(again.heed.engine), ["read_only"]);
 	});
 
 	it("a tool call that beats understanding waits for it", async () => {
@@ -284,12 +284,13 @@ describe("v0.2: exceptions, understanding, speculation", () => {
 		assert.equal(calls, 1);
 	});
 
-	it("constraints said while off are picked up when switched on", async () => {
+	it("constraints said while off are tracked, not enforced, and apply once switched on", async () => {
 		const { pi, heed } = track(setup({ config: { mode: "off" } }));
 		await pi.user("Don't modify any files.");
-		assert.equal(heed.ledger.active().length, 0);
+		assert.equal(heed.engine.active().length, 1);
+		assert.equal(await pi.emit("tool_call", toolCall("edit", { path: "a.ts" })), undefined);
 		await pi.command("/heed mode enforce");
-		assert.equal(heed.ledger.active().length, 1);
+		assert.equal((await pi.emit("tool_call", toolCall("edit", { path: "a.ts" })))?.block, true);
 	});
 });
 

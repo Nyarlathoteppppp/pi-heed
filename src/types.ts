@@ -1,22 +1,5 @@
 export type Mode = "off" | "shadow" | "enforce";
 
-export type ConstraintKind = "read_only" | "no_tests" | "no_deps" | "protect_path" | "custom";
-
-export interface Constraint {
-	id: string;
-	kind: ConstraintKind;
-	/** The user's own words the constraint was extracted from. */
-	quote: string;
-	/** Path fragments for protect_path. */
-	paths?: string[];
-	active: boolean;
-	origin: "message" | "command";
-	/** Index of the user message it came from (for "later messages" checks). */
-	at: number;
-	/** Who recognised it. */
-	by: "rule" | "jev";
-}
-
 export type SideEffect = "read" | "write" | "exec" | "unknown";
 
 export interface ToolAction {
@@ -25,6 +8,10 @@ export interface ToolAction {
 	/** True when the call can change files, packages, git state or anything outside the process. */
 	mutates: boolean;
 	installsDeps: boolean;
+	gitPush: boolean;
+	gitCommit: boolean;
+	/** Runs a test suite (used by REQUIRE_BEFORE "run tests before …"). */
+	runsTests: boolean;
 	paths: string[];
 	/** One-line human-readable description, used as evidence. */
 	summary: string;

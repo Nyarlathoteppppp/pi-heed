@@ -28,6 +28,10 @@ const DEP_INSTALL: RegExp[] = [
 	/\b(?:cargo\s+add|go\s+get|gem\s+install|brew\s+install|apt(?:-get)?\s+install)\b/,
 ];
 
+const GIT_PUSH = /\bgit\s+push\b/;
+const GIT_COMMIT = /\bgit\s+commit\b/;
+const RUNS_TESTS = /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|\b(?:pytest|jest|vitest|mocha|rspec|phpunit)\b|\bgo\s+test\b|\bcargo\s+test\b|\bmake\s+test\b|\bnode\s+--test\b|\bpython3?\s+-m\s+(?:pytest|unittest)\b/;
+
 function str(v: unknown): string | undefined {
 	return typeof v === "string" ? v : undefined;
 }
@@ -35,11 +39,11 @@ function str(v: unknown): string | undefined {
 export function classify(toolName: string, input: Record<string, unknown>): ToolAction {
 	if (READ_TOOLS.has(toolName)) {
 		const path = str(input.path) ?? str(input.pattern) ?? "";
-		return { toolName, effect: "read", mutates: false, installsDeps: false, paths: path ? [path] : [], summary: `${toolName} ${path}`.trim() };
+		return { toolName, effect: "read", mutates: false, installsDeps: false, gitPush: false, gitCommit: false, runsTests: false, paths: path ? [path] : [], summary: `${toolName} ${path}`.trim() };
 	}
 	if (WRITE_TOOLS.has(toolName)) {
 		const path = str(input.path) ?? str(input.file_path) ?? "";
-		return { toolName, effect: "write", mutates: true, installsDeps: false, paths: path ? [path] : [], summary: `${toolName} ${path}`.trim() };
+		return { toolName, effect: "write", mutates: true, installsDeps: false, gitPush: false, gitCommit: false, runsTests: false, paths: path ? [path] : [], summary: `${toolName} ${path}`.trim() };
 	}
 	if (toolName === "bash") {
 		const command = str(input.command) ?? "";
@@ -50,12 +54,15 @@ export function classify(toolName: string, input: Record<string, unknown>): Tool
 			effect: "exec",
 			mutates: mutates || installsDeps,
 			installsDeps,
+			gitPush: GIT_PUSH.test(command),
+			gitCommit: GIT_COMMIT.test(command),
+			runsTests: RUNS_TESTS.test(command),
 			paths: extractPaths(command),
 			summary: `bash: ${truncate(command, 200)}`,
 		};
 	}
 	// Extension/MCP tools: unknown side effects. Only semantic (Jev) checks apply.
-	return { toolName, effect: "unknown", mutates: false, installsDeps: false, paths: [], summary: `${toolName} ${truncate(JSON.stringify(input), 200)}` };
+	return { toolName, effect: "unknown", mutates: false, installsDeps: false, gitPush: false, gitCommit: false, runsTests: false, paths: [], summary: `${toolName} ${truncate(JSON.stringify(input), 200)}` };
 }
 
 function extractPaths(command: string): string[] {
