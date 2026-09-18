@@ -65,12 +65,28 @@ Resolution per call: the most specific resource wins (file > dir > tests > every
 Sessions with at least one false block: 16.3% (v0.3) → **0.0%**. Two cases sit at a threshold and flip between live
 recordings, so read v0.5 as 95.9–98.0% task success.
 
-## Experiments
+## Experiment report: using a fast decision model well
 
-Everything above was measured, and every design choice has an entry in **[EXPERIMENTS.md](EXPERIMENTS.md)**: where
-the latency goes (E01), Jev's calibration and determinism, which question formats work (E05), and one result that
-reversed an earlier conclusion (E06: option sets bleed across constraint kinds). Per-judgement tables are in
-[bench/JEV-LAB.md](bench/JEV-LAB.md).
+[Jev](https://docs.typesafe.ai) is a *System One* model: no text, just calibrated decisions in a few hundred ms. We
+measured every judgement pi-heed asks it for (70 labelled items, 108 cross-kind pairs, 49 benchmark sessions) and
+changed the design where the data said so. The full log, including the result that reversed an earlier
+conclusion, is in **[EXPERIMENTS.md](EXPERIMENTS.md)** (E01–E08). Per-judgement tables are in [bench/JEV-LAB.md](bench/JEV-LAB.md).
+
+**What we found, and what we changed because of it**
+
+| # | Finding | Evidence | What pi-heed does |
+|---|---|---|---|
+| 1 | **The probabilities are calibrated**, slightly underconfident at the top | p 0.9–1.0 → 98% true · 0.7–0.9 → 94% · 0–0.1 → 7% | Treats p as a probability; thresholds (0.9) are conservative on purpose |
+| 2 | **Latency is flat in the number of questions**; parallel requests are slower | 1 / 4 / 8 questions: 274 / 273 / 276 ms · 8 parallel: ~650 ms | Everything about a message goes in one request |
+| 3 | **The only latency lever is *when* you ask** | pi-heed's own code: 1–46 µs · Jev floor ~250 ms | Pre-judges while the model streams (edit/write from the path alone); shadow mode never waits. Real pi: blocked a `write` after **0 ms** wait |
+| 4 | **Ask about intent, not a taxonomy** | lift detection: `KEEP/LIFT/NARROW…` 71% → *"is this your go-ahead?"* **93%**, confident answers 100% right | Go-ahead question for lifts ("Ship it", "按你的方案改吧" now work) |
+| 5 | **Jev anchors on what it reads first** | exception check with the call and messages *before* the old constraint: confident answers 75% → **100%** right | Field order + "later messages override earlier ones" |
+| 6 | **Option sets help only when the options exclude each other** | read-only alone: 95% → 100%, but asked across 4 kinds a `forbidden/allowed/unclear` choice **bled: 27/91 false adds** | Combines a yes/no statement with the choice (17/17, 0 false adds after a guard); every choice has an `unclear` escape |
+| 7 | **Voting doesn't fix blind spots** | errors are correlated across phrasings; averaging mostly cost coverage | Better questions instead of ensembles |
+| 8 | **Don't ask Jev what the rules already know** | "an edit changes files": p ≈ 0.7 | Side effects, paths and scopes are deterministic rules; Jev only judges meaning |
+| 9 | **Only Jev-decided calls compound** | 145 deterministic decisions, 0 wrong · 52 Jev-influenced, 1 wrong · 40 Jev-judged writes in one session, 40 right | Asks once per prohibition which tools can't break it and skips those calls (0 wrong skips) |
+
+Cost stayed negligible throughout: ≈ $0.00005 per session, about 2.5 Jev calls.
 
 ## Why it's different
 
@@ -82,39 +98,6 @@ reversed an earlier conclusion (E06: option sets bleed across constraint kinds).
 | Why it acted | "blocked" | **evidence**: your quote + the exact call + the fix |
 | Exceptions | all or nothing | *"except notes.txt"* is understood |
 | Uncertain? | guesses | **abstains** (`insufficient`) or fails open |
-
-## Built to use a fast decision model properly
-
-[Jev](https://docs.typesafe.ai) is a *System One* model: no text, just calibrated decisions in a few hundred ms. pi-heed spends it where an LLM would be too slow and a regex too dumb:
-
-- **⚡ Judged while the model is still typing.** pi parses tool arguments as they stream. For `edit`/`write`, the path streams before the file body, so pi-heed starts deciding once the path is complete, while the model is still writing the content. Other tools start at `toolcall_end`.
-- **🧠 One call, many questions.** Each message you send gets a single background Jev request that asks at once: *did this set read-only? forbid tests? forbid deps? lift anything? is that "don't…" sentence a real prohibition?* It catches paraphrases like *"只看不改"* or *"hands off the code"* and drops fakes like *"don't forget to add tests"*.
-- **⚖️ Second opinion before every block.** A rule wants to block? Jev first checks whether you carved out an exception for exactly this call. Only a confident *permitted* (p ≥ 0.9, confidence ≥ 0.8) gets through.
-- **🔒 Deterministic where it matters.** Side-effect detection is rules, not vibes (Jev rated *"edit changes files"* at ~0.7 — so we don't ask it that).
-
-Measured against live `~typesafe/jev-latest` (OpenRouter):
-
-| | result | latency |
-|---|---|---|
-| Free-text constraint checks (prod API, `git push`, public API changes) | 6 / 6 correct | 235–1550 ms |
-| Exception second opinion | 3 / 3 correct | 258–417 ms |
-| Paraphrased constraints | *"只看不改"*: p ≥ 0.9 · *"hands off the code"*: 0.85 · non-constraints ≤ 0.03 | 280–980 ms |
-| In real pi: exception granted, call pre-judged at `toolcall_end` | ✔ | tool call waited 189 ms |
-| In real pi: `write` under read-only, judged from the streamed path | blocked | **tool call waited 0 ms** (Jev took 338 ms) |
-| Cost per decision | ≈ $0.000017 | |
-
-## Where the time goes
-
-Measured, so you know what pi-heed costs you:
-
-| | cost |
-|---|---|
-| pi-heed's own logic (rules, classification, extraction) | 1–46 µs |
-| Network (TLS to OpenRouter; DNS only the first time) | 15–20 ms, plus 187 ms cold DNS once. Pre-warmed at session start |
-| One Jev decision, 1 to 8 questions | median ~275 ms; question count barely matters |
-| 8 questions split into 8 parallel requests | ~650 ms, so pi-heed never splits them |
-
-Only `tool_call` can make pi wait, and only for a mutating call under an active constraint in **enforce** mode. **Shadow mode never waits**: it decides and logs in the background.
 
 ## Install
 
