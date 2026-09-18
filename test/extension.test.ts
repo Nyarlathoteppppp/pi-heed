@@ -226,10 +226,8 @@ describe("v0.2: exceptions, understanding, speculation", () => {
 	it("background understanding adds a paraphrased constraint and drops a fake one", async () => {
 		const judge = fullJudge((k) =>
 			k === "set_read_only"
-				? { type: "noul", noul: 0.6 }
-				: k === "may_read_only"
-					? { type: "choice", choice: "forbidden", probabilities: { forbidden: 0.95, allowed: 0.03, unclear: 0.02 }, confidence: 0.9 }
-					: k.startsWith("real_")
+				? { type: "noul", noul: 0.92 }
+				: k.startsWith("real_")
 					? { type: "noul", noul: 0.02 }
 					: { type: "noul", noul: 0.01 },
 		);

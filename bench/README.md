@@ -38,9 +38,10 @@ Jev: `~typesafe/jev-latest` via OpenRouter (resolved to `typesafe/jev-1.13-20260
 |---|---|---|---|---|---|---|---|---|---|
 | v0.3.0, rules | 59.5% | 6.5% | 63.6% | 46.9% | 20.4% | 32.7% | 0 | $0 | 0 / 0 ms |
 | v0.3.0 + Jev | 71.4% | 5.2% | 70.5% | 61.2% | 16.3% | 22.4% | 2.94 | $0.000051 | 0 / 409 ms |
-| **v0.4.0 / v0.5.0, rules** | **90.5%** | **1.3%** | **93.2%** | **87.8%** | 4.1% | 8.2% | 0 | $0 | 0 / 0 ms |
+| **v0.4.0 – v0.5.1, rules** | **90.5%** | **1.3%** | **93.2%** | **87.8%** | 4.1% | 8.2% | 0 | $0 | 0 / 0 ms |
 | v0.4.0 + Jev | 95.2% | 0.6% | 95.5% | 93.9% | 2.0% | 4.1% | 2.51 | $0.000049 | 0 / 340 ms |
-| **v0.5.0 + Jev** | **97.6%** | **0.0%** | **100%** | **98.0%** | **0.0%** | **2.0%** | 2.53 | $0.000057 | 0 / 388 ms |
+| v0.5.0 + Jev | 97.6% | 0.0% | 100% | 98.0% | 0.0% | 2.0% | 2.53 | $0.000057 | 0 / 388 ms |
+| **v0.5.1 + Jev** | **97.6%** | **0.0%** | **100%** | **98.0%** | **0.0%** | **2.0%** | **1.71** | **$0.000038** | **0 / 313 ms** |
 
 - **recall**: share of calls that should be blocked that were blocked (42). **false block**: share of calls that should run that were blocked (155).
 - **Latency** is the time `tool_call` waits on pi-heed, with Jev answers replayed at their recorded latency (Jev call p50 321 ms, p95 540 ms, max 1636 ms). The runner does not simulate streaming, so pre-judging during streaming gets no head start: these are upper bounds.

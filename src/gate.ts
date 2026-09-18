@@ -82,13 +82,21 @@ export async function toolRelevance(judge: Judge | undefined, policy: Policy, ti
 		Object.entries(RELEVANCE_TOOLS).map(([tool, desc]) => [
 			tool,
 			{
+				// structured form (E09): 5/5 safe skips vs 3/5, still no wrong skip
 				type: "choice" as const,
-				instructions: `Can a single call to this tool violate the constraint? Tool: ${desc}`,
-				criteria: { can_violate: "Yes, one call of this tool can directly break the constraint", cannot: "No, this tool cannot break the constraint by itself", unclear: "It depends on details not given" },
+				instructions: {
+					question: "Can one call of the tool described in `tools." + tool + "` break `constraint` by itself?",
+					focus: "The call's own effect when it runs, not what edited code might do later.",
+				},
+				criteria: {
+					can_violate: { what: "Running one call of this tool can directly do what the constraint forbids", examples: ["'No database writes' vs a shell command"] },
+					cannot: { what: "One call of this tool cannot do what the constraint forbids", not_for: "Effects that need other code to run later", examples: ["'No database writes' vs editing a file"] },
+					unclear: "It depends on details not given",
+				},
 			},
 		]),
 	);
-	const { answers } = await ask(judge, { constraint: policy.resource }, questions, timeoutMs);
+	const { answers } = await ask(judge, { constraint: policy.resource, tools: RELEVANCE_TOOLS }, questions, timeoutMs);
 	const cannot: Record<string, boolean> = {};
 	for (const tool of Object.keys(RELEVANCE_TOOLS)) {
 		const a = answers?.[tool] as ChoiceAnswer | undefined;

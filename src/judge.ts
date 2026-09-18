@@ -1,14 +1,19 @@
 import { readFileSync } from "node:fs";
 
+/** Instructions and criteria accept JSON structure: {question, focus, …} and {what, not_for, examples}. */
+export type Guidance = string | Record<string, unknown> | unknown[] | null;
+
 export interface ChoiceQuestion {
 	type: "choice";
-	instructions: string;
-	criteria: Record<string, string>;
+	instructions: Guidance;
+	criteria: Record<string, Guidance>;
 }
 
 export interface NoulQuestion {
 	type: "noul";
-	instructions: string;
+	instructions: Guidance;
+	/** What a yes and a no mean, for subtle boundaries. */
+	criteria?: { true: Guidance; false: Guidance };
 }
 
 export type Question = ChoiceQuestion | NoulQuestion;

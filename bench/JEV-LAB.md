@@ -10,7 +10,8 @@ How reliable are the individual judgements pi-heed asks Jev for? 5 decision type
 3. **A fixed option set beats a yes/no statement whenever the situation is finite** (⚠ *corrected by
    [E06](../EXPERIMENTS.md#e06--option-sets-bleed-across-kinds): only when the options are mutually exclusive for the
    question asked. Asked about four kinds of prohibition at once, the choice bled across kinds: 27 false adds out of 91.
-   pi-heed now combines both forms.*) Read-only intent went from
+   The mechanism was later corrected in E09: questions are evaluated independently; the choice asked what is implied
+   rather than what was explicitly said.*) Read-only intent went from
    95% accuracy / 50% confident coverage (noul, the current production question) to **100% / 100%** as a
    choice of `forbidden / allowed / unclear`. Tool relevance went from 17% to **75%** confident coverage, still 100% accurate.
 4. **Ask about the user's intent, not a policy taxonomy.** Lift detection with the production `KEEP/LIFT/NARROW/…`

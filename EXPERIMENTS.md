@@ -15,9 +15,10 @@ decided and commit the script, so someone else can rerun it.
 | [E03](#e03--free-text-checks-and-exception-second-opinion) | Free-text checks and exception second opinion | 6/6 and 3/3 on hand cases; the second opinion fixed a real false block |
 | [E04](#e04--does-a-policy-engine-beat-a-constraint-list) | Does a policy engine beat a constraint list? | Task success 61% → 94%; a used once-permission was being revived by Jev |
 | [E05](#e05--how-reliable-is-each-judgement-jev-lab) | How reliable is each judgement? (Jev lab) | Calibrated; near-deterministic; option sets, intent framing and field order matter; voting doesn't |
-| [E06](#e06--option-sets-bleed-across-kinds) | Do option sets hold up across constraint kinds? | No: 27 false adds. The combination works, plus a guard |
+| [E06](#e06--option-sets-bleed-across-kinds) | Do option sets hold up across constraint kinds? | No: 27 false adds, because the question asked what is *implied*, not what was said (corrected in E09) |
 | [E07](#e07--can-jev-tell-which-tools-a-prohibition-concerns) | Can Jev tell which tools a prohibition concerns? | Yes when it is sure (0 wrong skips), and it is honestly unsure about "prod API vs edit" |
 | [E08](#e08--v05-benchmark) | v0.5 benchmark | recall 97.6%, false block 0.0%, task success 98.0% (borderline cases flip between live runs) |
+| [E09](#e09--typesafes-authoring-guidelines-structured-questions) | Do TypeSafe's authoring guidelines help? | For 3 of 8 judgements (read-only, push, tool relevance); prose stays for the rest. Jev-decided calls 52 → 12 |
 
 ---
 
@@ -141,9 +142,16 @@ asked about *four* kinds of prohibition (read-only, tests, deps, push)?
 | "explicitly forbid X / not this" choice | 8/17 | 0/91 |
 | statement ≥ 0.8, or statement ≥ 0.5 **and** choice ≥ 0.9 | **17/17** | 2/91 |
 
-The choice bleeds: "look but don't touch" also scores "forbids tests / deps / push"; "Don't push anything" scores
-read-only 0.91. It also shipped briefly and the benchmark caught it (false block 0.6% → 1.9%). Both remaining false
-adds came from a message the rules had already parsed.
+The choice over-reaches: "look but don't touch" also scores "forbids tests / deps / push"; "Don't push anything"
+scores read-only 0.91. It shipped briefly and the benchmark caught it (false block 0.6% → 1.9%). Both remaining
+false adds came from a message the rules had already parsed.
+
+> **Correction (after reading TypeSafe's docs, E09).** We first called this "bleeding across kinds", as if the
+> questions influenced each other. They don't: TypeSafe evaluates every question independently and in parallel. The
+> real cause was the question. *"May the assistant modify tests?"* asks what is **implied**, and read-only does imply
+> no test edits, so "forbidden" was a fair answer. We needed *"did the user **explicitly** forbid changing tests?"*.
+> The genuine errors were only "Don't push anything" → read-only and "Don't forget to add tests" → no tests. The data
+> above stands. The lesson is about asking exactly the question you mean, not about interference.
 
 **Decision.** Ask both forms in the same request and combine them as in the last row. Don't let Jev add built-in
 prohibitions to a message the rules already found a restriction in. Option sets are right only when the options
@@ -187,3 +195,56 @@ violation 0.70–0.88 against 0.9). The previous recording gave task success 95.
 suggests 0.9 is conservative; revisit with labelled real-session data (`/heed label`).
 
 **Reproduce.** `node bench/run.ts --judge replay` (offline, deterministic).
+
+## E09 · TypeSafe's authoring guidelines: structured questions
+
+**Question.** TypeSafe's docs recommend a specific way to write questions. Question ids are never sent to the model,
+so the instructions must stand alone. Point at state with backticked paths (`` `pending_tool_call` ``). One snap
+judgment per question: if it needs an "and" or a "but", split it. Use structured instructions `{question, focus}`
+and criteria `{what, not_for, examples}`, and give a Noul `true`/`false` criteria when the boundary is subtle.
+Sources: [how to build with System One](https://docs.typesafe.ai/concepts/how-to-build-with-system-one.md),
+[advanced structure](https://docs.typesafe.ai/primitives/advanced.md), the
+[SDK Noul docs](https://typesafe-api.hexdocs.pm/TypeSafeAPI.Question.Noul.html) and
+[Flavio Copes' handbook](https://flaviocopes.com/jev/). Do these beat our prose questions?
+
+**Setup.** Every judgement pi-heed asks, prose vs a structured rewrite, both in the same request on the same items
+(the E06 cross-kind set, lift, exception, free-text violation, tool relevance). The criteria **examples are not
+taken from any test set**, to avoid leaking answers. What matters is the "acted" column: how often each version
+crosses pi-heed's actual threshold, and whether it ever does so wrongly.
+
+**Result.** Mixed, so it is decided per judgement.
+
+| judgement | prose: acted correctly / wrongly | structured | adopted |
+|---|---|---|---|
+| read-only intent | 7/9 · 0 | **9/9 · 0** | structured |
+| no push | 1/2 · 0 | **2/2 · 0** | structured |
+| tool relevance (safe skips) | 3/5 · 0 | **5/5 · 0** | structured |
+| no tests | 3/3 · 0 | 3/3 · 0, but read-only messages rose to 0.6–0.75 | prose (wider margin) |
+| no deps | 2/3 · 0 | 2/3 · 0, thinner margin | prose |
+| go-ahead (lift) | **6/7** · 0 | 5/7 · 0 | prose |
+| exception check | **5/7** · 0 | 4/7 · 0 | prose |
+| free-text violation | 6/7 · 1 | 6/7 · 1 | prose (tie) |
+
+In pi-heed's real request shape (all three tools in one request), structured tool relevance skipped **8/8** safe
+pairs with 0 wrong skips (prose: 5/8). That includes "never call the production API" vs a file edit, which prose left
+unsure. Structured read-only alone (9/9, 0 false) also made E06's statement + choice combination unnecessary, so that
+was removed.
+
+Both forms confidently judge `rm -rf dist/` as violating "Don't delete any data" (0.97). Whether build output counts
+as data is arguable; it is listed as a known issue rather than tuned for.
+
+Benchmark (two independent fresh recordings, identical results):
+
+| | recall | false block | lifecycle | task success | Jev-influenced decisions | Jev calls / task | cost / task | p95 wait |
+|---|---|---|---|---|---|---|---|---|
+| v0.5.0 | 97.6% | 0.0% | 100% | 98.0% | 52 | 2.53 | $0.000057 | 388 ms |
+| **v0.5.1** | 97.6% | 0.0% | 100% | 98.0% | **12** | **1.71** | **$0.000038** | **271–313 ms** |
+
+Same quality with a quarter of the Jev-decided calls: that is the lever against compounding (E04).
+
+**Decision.** Adopt structured questions for read-only, push and tool relevance; keep prose for the others. Follow
+the guidelines as hypotheses to test, not as rules. TypeSafe also advises pinning the model version when thresholds
+are tuned against it. pi-heed follows `~typesafe/jev-latest` by the user's choice; `PI_HEED_MODEL` pins a version,
+and the benchmark should be re-recorded when the version changes.
+
+**Reproduce.** `bench/experiments/e09-structured-questions.ts` (live); `node bench/run.ts --judge replay`.

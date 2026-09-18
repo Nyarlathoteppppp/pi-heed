@@ -18,26 +18,50 @@ export const DELTA_CRITERIA = {
 
 export type DeltaKind = keyof typeof DELTA_CRITERIA;
 
-// Built-in prohibitions are asked two ways in the same request (latency is flat in the number of questions).
-// The yes/no statement is precise but misses paraphrases ("look but don't touch": 0.57); the forbidden/allowed/unclear
-// choice catches them but bleeds across kinds (read-only → "also no tests, deps, push"). A/B on 108 labelled
-// (message, kind) pairs: statement alone 13/17 recall, 0 false adds; choice alone 17/17, 27 false adds;
-// statement ≥ 0.8, or statement ≥ 0.5 with choice ≥ 0.9: 17/17. Its only 2 false adds were cross-talk from a
-// message the rules had already parsed, which the caller excludes.
-const BUILTIN_DENIES = {
-	read_only: { text: "The user explicitly forbids the assistant from modifying any files (read-only, review only, just look, no edits).", what: "modify files", action: "modify", resource: "*" },
-	no_tests: { text: "The user explicitly forbids the assistant from modifying, deleting, disabling or skipping tests.", what: "modify, delete, disable or skip tests", action: "modify", resource: "tests" },
-	no_deps: { text: "The user explicitly forbids the assistant from adding or installing new dependencies or packages.", what: "add or install new dependencies or packages", action: "install_deps", resource: "*" },
-	no_push: { text: "The user explicitly forbids the assistant from pushing to a remote (git push).", what: "push to a remote (git push)", action: "git_push", resource: "*" },
-} as const;
-
-function mayQuestion(what: string): Question {
-	return {
-		type: "choice",
-		instructions: `According to new_user_message, may the assistant ${what}?`,
-		criteria: { forbidden: `The user does not want the assistant to ${what}`, allowed: "The user wants or allows it", unclear: "The message does not say, or cannot tell" },
-	};
-}
+// Built-in prohibitions: one Noul each. Read-only and push use TypeSafe's structured form (question + focus, true/false
+// criteria with not_for and examples); tests and deps keep the prose statement, which kept a wider margin (E09).
+// Structured read-only alone caught 9/9 paraphrases with no false adds, replacing the statement+choice combination (E06).
+// Criteria examples are deliberately not taken from the benchmark or lab sets.
+const BUILTIN_DENIES: Record<string, { question: Question; action: "modify" | "install_deps" | "git_push"; resource: string }> = {
+	read_only: {
+		question: {
+			type: "noul",
+			instructions: { question: "Does `new_user_message` forbid the assistant from changing any files?", focus: "A ban on all file changes, or a request for review, explanation or a report only." },
+			criteria: {
+				true: { what: "The user wants files left unchanged for now", examples: ["Just read through it and summarise, no changes.", "只分析一下，先不要修改"] },
+				false: {
+					what: "Changes are allowed or requested, or nothing is said about them",
+					not_for: "A ban on one specific action only, such as pushing, committing or adding packages",
+					examples: ["Please clean this up.", "Don't commit yet."],
+				},
+			},
+		},
+		action: "modify",
+		resource: "*",
+	},
+	no_tests: {
+		question: { type: "noul", instructions: "The user explicitly forbids the assistant from modifying, deleting, disabling or skipping tests." },
+		action: "modify",
+		resource: "tests",
+	},
+	no_deps: {
+		question: { type: "noul", instructions: "The user explicitly forbids the assistant from adding or installing new dependencies or packages." },
+		action: "install_deps",
+		resource: "*",
+	},
+	no_push: {
+		question: {
+			type: "noul",
+			instructions: { question: "Does `new_user_message` forbid the assistant from pushing to a remote repository?" },
+			criteria: {
+				true: { what: "The user says not to push", examples: ["Keep it local, no pushing.", "先别 push"] },
+				false: { what: "No ban on pushing", not_for: "A ban on committing or editing only", examples: ["Push when you're done.", "Don't edit the config."] },
+			},
+		},
+		action: "git_push",
+		resource: "*",
+	},
+};
 
 // Asking about the user's intent beats a policy taxonomy for lifts (Jev lab: 71% → 93%, confident answers 100% right).
 export const GO_AHEAD: Question = {
@@ -54,10 +78,8 @@ export const GO_AHEAD: Question = {
 export const THRESHOLDS = {
 	/** A delta choice must have this probability and confidence to be applied. */
 	delta: { p: 0.9, confidence: 0.8 },
-	/** Add a built-in restriction when statement ≥ add, or statement ≥ addWeak and choice ≥ addChoice. */
+	/** P(yes) to add a built-in restriction. Calibration (E05): 0.7–0.9 → 94% true, ≥ 0.9 → 98%. */
 	add: 0.8,
-	addWeak: 0.5,
-	addChoice: 0.9,
 	/** P(go_ahead) and confidence to lift read-only. */
 	goAhead: { p: 0.9, confidence: 0.8 },
 	temporary: 0.8,
@@ -107,9 +129,7 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 	const rulesRestricted = input.createdByRules.some((p) => p.effect !== "ALLOW" && p.action !== "custom");
 	if (!rulesRestricted) {
 		for (const [name, d] of Object.entries(BUILTIN_DENIES)) {
-			if (activeKeys.has(`DENY|${d.action}|${d.resource}`)) continue;
-			questions[`set_${name}`] = { type: "noul", instructions: d.text };
-			questions[`may_${name}`] = mayQuestion(d.what);
+			if (!activeKeys.has(`DENY|${d.action}|${d.resource}`)) questions[`set_${name}`] = d.question;
 		}
 	}
 	const readOnly = existing.filter((p) => p.effect === "DENY" && p.action === "modify" && p.resource === "*");
@@ -193,11 +213,7 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 	}
 
 	for (const [name, d] of Object.entries(BUILTIN_DENIES)) {
-		const statement = noul(`set_${name}`) ?? 0;
-		const forbidden = choiceP(`may_${name}`, "forbidden")?.p ?? 0;
-		if (forbidden) out.signals[`may_${name}`] = forbidden;
-		const add = statement >= THRESHOLDS.add || (statement >= THRESHOLDS.addWeak && forbidden >= THRESHOLDS.addChoice);
-		if (add && !input.createdByRules.some((p) => p.effect === "DENY" && p.action === d.action && p.resource === d.resource)) {
+		if ((noul(`set_${name}`) ?? 0) >= THRESHOLDS.add && !input.createdByRules.some((p) => p.effect === "DENY" && p.action === d.action && p.resource === d.resource)) {
 			out.ops.push({
 				op: "add",
 				spec: { effect: "DENY", action: d.action, resource: d.resource, scope: "session", sourceQuote: truncate(input.message, 300), by: "jev", at: input.at },
