@@ -1,0 +1,14 @@
+import { classify } from "../../src/actions.ts";
+import { ConstraintLedger } from "../../src/constraints.ts";
+import { ruleCheck } from "../../src/gate.ts";
+const N = 20000;
+const t = (name: string, f: () => void) => { const s = performance.now(); for (let i = 0; i < N; i++) f(); console.log(`${name.padEnd(28)} ${((performance.now() - s) * 1000 / N).toFixed(2)} µs/op`); };
+const long = "Please review the auth module carefully. Don't modify any files. Also never call the production API, and don't touch the tests. ".repeat(20);
+const l = new ConstraintLedger(); l.ingest("Don't modify any files. Never call prod.");
+const cmd = { command: "cd src && npm run build 2>&1 | tail -20 && git status && echo done > /tmp/x" };
+t("classify(bash)", () => classify("bash", cmd));
+t("classify(edit)", () => classify("edit", { path: "src/a.ts", edits: [] }));
+t("ruleCheck", () => ruleCheck(l.active(), classify("bash", cmd)));
+t("ingest(short msg)", () => new ConstraintLedger().ingest("Fix the bug but don't touch the tests"));
+t("ingest(2.5KB msg)", () => new ConstraintLedger().ingest(long));
+t("JSON.stringify(input) key", () => JSON.stringify({ path: "a.ts", edits: [{ oldText: "x".repeat(4000), newText: "y".repeat(4000) }] }));

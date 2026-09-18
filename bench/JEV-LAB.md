@@ -7,7 +7,10 @@ How reliable are the individual judgements pi-heed asks Jev for? 5 decision type
    0.0–0.1 → 7%. The probabilities can be used as probabilities.
 2. **Near-deterministic.** Five identical requests usually vary by ±0.02, but one moved 0.64 → 0.44. Re-asking the
    same question adds almost nothing; values near a threshold can occasionally flip.
-3. **A fixed option set beats a yes/no statement whenever the situation is finite.** Read-only intent went from
+3. **A fixed option set beats a yes/no statement whenever the situation is finite** (⚠ *corrected by
+   [E06](../EXPERIMENTS.md#e06--option-sets-bleed-across-kinds): only when the options are mutually exclusive for the
+   question asked. Asked about four kinds of prohibition at once, the choice bled across kinds: 27 false adds out of 91.
+   pi-heed now combines both forms.*) Read-only intent went from
    95% accuracy / 50% confident coverage (noul, the current production question) to **100% / 100%** as a
    choice of `forbidden / allowed / unclear`. Tool relevance went from 17% to **75%** confident coverage, still 100% accurate.
 4. **Ask about the user's intent, not a policy taxonomy.** Lift detection with the production `KEEP/LIFT/NARROW/…`

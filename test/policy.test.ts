@@ -253,6 +253,54 @@ describe("Jev deltas", () => {
 		assert.equal(heed.engine.active().find((p) => p.effect === "ALLOW")!.scope, "once");
 	});
 
+	it("go-ahead lifts read-only; not when the rules found a scoped permission in the same message", async () => {
+		const go = (p: number): Answer => ({ type: "choice", choice: "go_ahead", probabilities: { go_ahead: p, not_yet: 1 - p }, confidence: 0.9 });
+		const judge = deltaJudge((k) => (k === "go_ahead" ? go(0.95) : k.startsWith("delta_") ? choice("KEEP") : undefined));
+		const a = enforce(judge);
+		await a.pi.user("Don't modify any files.");
+		await next(a.pi, "Ship it.");
+		await a.heed.settled();
+		assert.deepEqual(a.heed.engine.active(), []);
+
+		const b = enforce(judge);
+		await b.pi.user("Don't modify any files.");
+		await next(b.pi, "You can edit notes.txt only.");
+		await b.heed.settled();
+		assert.deepEqual(kinds(b.heed.engine), ["read_only", "ALLOW:notes.txt"]);
+	});
+
+	it("an unclear go-ahead changes nothing", async () => {
+		const judge = deltaJudge((k) => (k === "go_ahead" ? { type: "choice", choice: "unclear", probabilities: { unclear: 0.6, go_ahead: 0.3 }, confidence: 0.5 } : undefined));
+		const { pi, heed } = enforce(judge);
+		await pi.user("Don't modify any files.");
+		await next(pi, "hmm ok");
+		await heed.settled();
+		assert.deepEqual(kinds(heed.engine), ["read_only"]);
+	});
+
+	it("tool relevance: a free-text prohibition is not checked on tools that cannot break it", async () => {
+		const asked: string[] = [];
+		const judge: Judge = {
+			name: "fake",
+			decide: async (_s, qs): Promise<Record<string, Answer>> => {
+				asked.push(Object.keys(qs).sort().join(","));
+				if ("edit" in qs) {
+					const c = (x: string): Answer => ({ type: "choice", choice: x, probabilities: { [x]: 0.97 }, confidence: 0.95 });
+					return { edit: c("cannot"), write: c("cannot"), bash: c("can_violate") };
+				}
+				if ("q" in qs) return { q: choice("violates", 0.97, 0.9) };
+				return {};
+			},
+		};
+		const { pi, heed } = enforce(judge);
+		await pi.user("Never call the production API.");
+		await heed.settled();
+		for (let i = 0; i < 5; i++) assert.equal(await edit(pi, `src/f${i}.ts`), false);
+		assert.equal(await bash(pi, "curl -X POST https://api.prod/x"), true);
+		assert.equal(asked.filter((k) => k === "q").length, 1); // only the bash call was judged
+		assert.equal(asked.filter((k) => k.includes("edit")).length, 1); // relevance asked once
+	});
+
 	it("Jev timeout leaves the rule state as it was", async () => {
 		const slow: Judge = { name: "slow", decide: (_s, _q, signal) => new Promise((_, rej) => signal.addEventListener("abort", () => rej(new Error("x")))) };
 		const { pi, heed } = setup({ config: { mode: "enforce", judgeTimeoutMs: 20 }, judge: slow });

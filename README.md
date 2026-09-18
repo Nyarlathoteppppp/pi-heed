@@ -8,7 +8,7 @@ Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effect
 
 [![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1-7c5cff)](https://pi.dev)
 [![Jev](https://img.shields.io/badge/powered%20by-TypeSafe%20Jev-f5a524)](https://docs.typesafe.ai)
-[![tests](https://img.shields.io/badge/tests-88%20passing-2ea043)](#development)
+[![tests](https://img.shields.io/badge/tests-91%20passing-2ea043)](#development)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
@@ -49,7 +49,7 @@ What you say over a session is a policy that changes: *"don't touch src — but 
 
 Resolution per call: the most specific resource wins (file > dir > tests > everything), then the more specific action, then the newer instruction. Nothing is deleted. Every change is an op persisted in the session, so after a reload or compaction the state replays to exactly what it was, without calling Jev again.
 
-**Jev's job is narrow.** It never writes a policy. For each message it classifies how each existing policy changed (`KEEP / LIFT / NARROW / EXCEPTION / REPLACE / UNKNOWN`) and answers a few yes/no signals (new prohibition? temporary permission? new task?). pi-heed applies only confident answers, and takes resources from your message, never from Jev. Anything uncertain changes nothing.
+**Jev's job is narrow.** It never writes a policy. For each message it classifies how each existing policy changed (`KEEP / LIFT / NARROW / EXCEPTION / REPLACE / UNKNOWN`), asks whether this is your go-ahead to start changing things, and answers a few signals (new prohibition? temporary permission? new task?). Finite situations get a fixed option set with an explicit `unclear`. pi-heed applies only confident answers, and takes resources from your message, never from Jev. Anything uncertain changes nothing. A free-text prohibition is also asked once which tools cannot break it, so those calls skip the per-call check.
 
 ## Benchmark
 
@@ -58,10 +58,19 @@ Resolution per call: the most specific resource wins (file > dir > tests > every
 | | recall | false block | lifecycle | task success | cost / task |
 |---|---|---|---|---|---|
 | v0.3.0 + Jev | 71.4% | 5.2% | 70.5% | 61.2% | $0.000051 |
-| **v0.4.0, rules only** | 90.5% | 1.3% | 93.2% | 87.8% | $0 |
-| **v0.4.0 + Jev** | **95.2%** | **0.6%** | **95.5%** | **93.9%** | $0.000049 |
+| v0.4.0 + Jev | 95.2% | 0.6% | 95.5% | 93.9% | $0.000049 |
+| **v0.5.0, rules only** | 90.5% | 1.3% | 93.2% | 87.8% | $0 |
+| **v0.5.0 + Jev** | **97.6%** | **0.0%** | **100%** | **98.0%** | $0.000057 |
 
-Sessions with at least one false block: 16.3% → **2.0%**.
+Sessions with at least one false block: 16.3% (v0.3) → **0.0%**. Two cases sit at a threshold and flip between live
+recordings, so read v0.5 as 95.9–98.0% task success.
+
+## Experiments
+
+Everything above was measured, and every design choice has an entry in **[EXPERIMENTS.md](EXPERIMENTS.md)**: where
+the latency goes (E01), Jev's calibration and determinism, which question formats work (E05), and one result that
+reversed an earlier conclusion (E06: option sets bleed across constraint kinds). Per-judgement tables are in
+[bench/JEV-LAB.md](bench/JEV-LAB.md).
 
 ## Why it's different
 
@@ -182,14 +191,15 @@ Semantic checks need one of:
 
 - [ ] Suggest-only rollback to the last verified checkpoint (with [pi-rewind-hook](https://github.com/nicobailon/pi-rewind-hook))
 - [x] Benchmark: lifecycle, long sessions, compaction, adversarial ([bench/](bench/README.md))
-- [ ] Fewer Jev-decided calls per session (per-policy tool relevance), and agreement across paraphrased questions for the ones that remain
+- [x] Fewer Jev-decided calls per session: per-policy tool relevance (E07)
+- [ ] Recalibrate thresholds from labelled real-session data (`/heed label`); E05 suggests 0.9 is conservative
 - [ ] Threshold calibration from `/heed label` data
 
 ## Development
 
 ```bash
 npm install
-npm test                                        # 88 tests, no network
+npm test                                        # 91 tests, no network
 node bench/run.ts --judge replay                # benchmark, offline
 npm run typecheck
 PI_HEED_ENV_FILE=~/.env npm run smoke:jev       # live Jev check

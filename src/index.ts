@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { classify, truncate } from "./actions.ts";
-import { exceptionCheck, judgeCheck, policyVerdict } from "./gate.ts";
+import { exceptionCheck, judgeCheck, policyVerdict, RELEVANCE_TOOLS, toolRelevance } from "./gate.ts";
 import { JevJudge, type Judge, resolveTransport, settle } from "./judge.ts";
 import { describe, type Policy, PolicyEngine, type PolicyOp, type Prerequisite, type Resolution } from "./policy.ts";
 import { RepeatTracker } from "./repeat.ts";
@@ -92,6 +92,8 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	const pending = new Map<string, ToolAction>();
 	const speculative = new Map<string, { inputKey: string; decision: Promise<Decision | undefined>; early: boolean; path?: string }>();
 	const memo = new Map<string, Promise<Decision>>();
+	/** Per free-text policy: tools Jev is confident cannot break it. Asked once, in one request, per policy. */
+	const relevance = new Map<string, Promise<Record<string, boolean>>>();
 	let understanding: Promise<void> | undefined;
 	let run = 0;
 	let interventions = 0;
@@ -129,6 +131,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		pending.clear();
 		speculative.clear();
 		memo.clear();
+		relevance.clear();
 		userMessages.length = 0;
 		understanding = undefined;
 		testsOkEpoch = -1;
@@ -195,7 +198,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	async function decide(action: ToolAction, input: Record<string, unknown>, signal?: AbortSignal): Promise<Decision> {
 		const r = engine.resolve(action, satisfied);
 		if (r.policy) return restrictiveDecision(r, action, signal);
-		const custom = engine.customDenies();
+		const custom = await relevantCustom(engine.customDenies(), action.toolName);
 		if (custom.length === 0) return { ms: 0 };
 		const key = JSON.stringify([custom.map((c) => c.id), action.toolName, input]);
 		let hit = memo.get(key);
@@ -208,6 +211,22 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 			if (memo.size > MEMO_LIMIT) memo.delete(memo.keys().next().value!);
 		}
 		return hit;
+	}
+
+	function relevanceOf(p: Policy): Promise<Record<string, boolean>> {
+		let r = relevance.get(p.id);
+		if (!r) {
+			r = toolRelevance(judge, p, config.judgeTimeoutMs);
+			relevance.set(p.id, r);
+		}
+		return r;
+	}
+
+	/** Free-text policies that this tool could break. Unknown tools and unanswered questions keep every policy. */
+	async function relevantCustom(custom: Policy[], tool: string): Promise<Policy[]> {
+		if (!judge || !(tool in RELEVANCE_TOOLS) || custom.length === 0) return custom;
+		const cannot = await Promise.all(custom.map((p) => settle(relevanceOf(p), config.judgeTimeoutMs)));
+		return custom.filter((_, i) => !cannot[i]?.[tool]);
 	}
 
 	/** Once-permissions that let a call through are used up. */
@@ -283,6 +302,8 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 			hasGoalScoped: before.some((p) => p.scope === "goal"),
 			mentionedPaths: mentionedPaths(text),
 		};
+		// Ask which tools a new free-text prohibition can concern now, not on the first tool call.
+		for (const p of input.createdByRules) if (p.action === "custom") void relevanceOf(p);
 		// Policy deltas in the background; the gate awaits this only if a tool call beats it.
 		understanding = understand(judge, input, config.judgeTimeoutMs).then((u) => {
 			const jevLines = u.ops.length ? commit({ kind: "jev", at, ops: u.ops }) : [];

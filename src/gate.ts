@@ -53,16 +53,49 @@ export const CUSTOM_QUESTION: ChoiceQuestion = {
 	},
 };
 
+// Jev anchors on what it reads first: the pending call and the user's messages go before the old constraint,
+// and the question says newer messages win (Jev lab: confident answers 75% → 100% right).
 export const EXCEPTION_QUESTION: ChoiceQuestion = {
 	type: "choice",
 	instructions:
-		"Do the user messages since the constraint was stated (including the one that stated it) explicitly permit this specific pending call, for example by making an exception for this file or this command?",
+		"Read user_messages_since_constraint in order; a later message overrides an earlier one where they conflict, and all of them override the constraint. Taken together, do they ask for, or clearly allow, pending_tool_call?",
 	criteria: {
-		permitted: "A user message explicitly allows this specific action",
-		not_permitted: "No user message allows this action; the constraint still applies to it",
-		unclear: "The messages are ambiguous about this action",
+		yes: "Yes, this exact call is asked for or clearly allowed",
+		no: "No, the messages do not cover this call",
+		unclear: "Cannot tell",
 	},
 };
+
+/** Tools whose side effects are known well enough to ask once whether they can break a free-text prohibition. */
+export const RELEVANCE_TOOLS: Record<string, string> = {
+	edit: "edit: replaces text in one existing file on disk",
+	write: "write: creates or overwrites one file on disk",
+	bash: "bash: runs an arbitrary shell command",
+};
+
+/**
+ * Per free-text prohibition, asked once for all known tools in one request: which tools cannot break it at all?
+ * Lets pi-heed skip per-call checks that can only add risk ("never call the production API" vs a file edit).
+ */
+export async function toolRelevance(judge: Judge | undefined, policy: Policy, timeoutMs: number): Promise<Record<string, boolean>> {
+	const questions = Object.fromEntries(
+		Object.entries(RELEVANCE_TOOLS).map(([tool, desc]) => [
+			tool,
+			{
+				type: "choice" as const,
+				instructions: `Can a single call to this tool violate the constraint? Tool: ${desc}`,
+				criteria: { can_violate: "Yes, one call of this tool can directly break the constraint", cannot: "No, this tool cannot break the constraint by itself", unclear: "It depends on details not given" },
+			},
+		]),
+	);
+	const { answers } = await ask(judge, { constraint: policy.resource }, questions, timeoutMs);
+	const cannot: Record<string, boolean> = {};
+	for (const tool of Object.keys(RELEVANCE_TOOLS)) {
+		const a = answers?.[tool] as ChoiceAnswer | undefined;
+		cannot[tool] = !!a && a.type === "choice" && a.choice === "cannot" && (a.probabilities.cannot ?? 0) >= 0.9 && a.confidence >= 0.8;
+	}
+	return cannot;
+}
 
 export interface JudgedCheck {
 	verdict?: Verdict;
@@ -128,12 +161,12 @@ export async function exceptionCheck(
 ): Promise<ExceptionCheck> {
 	if (!judge || messagesSince.length === 0) return { permitted: false, ms: 0 };
 	const state = {
-		constraint: policy.sourceQuote,
-		user_messages_since_constraint: messagesSince.map((m) => truncate(m, 600)),
 		pending_tool_call: action.summary,
+		user_messages_since_constraint: messagesSince.map((m) => truncate(m, 600)),
+		constraint: policy.sourceQuote,
 	};
 	const { answers, error, ms } = await ask(judge, state, { q: EXCEPTION_QUESTION }, timeoutMs, signal);
 	const answer = answers?.q as ChoiceAnswer | undefined;
 	if (!answer) return { permitted: false, error, ms };
-	return { permitted: answer.choice === "permitted" && probOf(answer) >= 0.9 && answer.confidence >= 0.8, answer, ms };
+	return { permitted: answer.choice === "yes" && probOf(answer) >= 0.9 && answer.confidence >= 0.8, answer, ms };
 }

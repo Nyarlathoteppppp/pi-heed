@@ -18,18 +18,48 @@ export const DELTA_CRITERIA = {
 
 export type DeltaKind = keyof typeof DELTA_CRITERIA;
 
+// Built-in prohibitions are asked two ways in the same request (latency is flat in the number of questions).
+// The yes/no statement is precise but misses paraphrases ("look but don't touch": 0.57); the forbidden/allowed/unclear
+// choice catches them but bleeds across kinds (read-only → "also no tests, deps, push"). A/B on 108 labelled
+// (message, kind) pairs: statement alone 13/17 recall, 0 false adds; choice alone 17/17, 27 false adds;
+// statement ≥ 0.8, or statement ≥ 0.5 with choice ≥ 0.9: 17/17. Its only 2 false adds were cross-talk from a
+// message the rules had already parsed, which the caller excludes.
 const BUILTIN_DENIES = {
-	read_only: { text: "The user explicitly forbids the assistant from modifying any files (read-only, review only, just look, no edits).", action: "modify", resource: "*" },
-	no_tests: { text: "The user explicitly forbids the assistant from modifying, deleting, disabling or skipping tests.", action: "modify", resource: "tests" },
-	no_deps: { text: "The user explicitly forbids the assistant from adding or installing new dependencies or packages.", action: "install_deps", resource: "*" },
-	no_push: { text: "The user explicitly forbids the assistant from pushing to a remote (git push).", action: "git_push", resource: "*" },
+	read_only: { text: "The user explicitly forbids the assistant from modifying any files (read-only, review only, just look, no edits).", what: "modify files", action: "modify", resource: "*" },
+	no_tests: { text: "The user explicitly forbids the assistant from modifying, deleting, disabling or skipping tests.", what: "modify, delete, disable or skip tests", action: "modify", resource: "tests" },
+	no_deps: { text: "The user explicitly forbids the assistant from adding or installing new dependencies or packages.", what: "add or install new dependencies or packages", action: "install_deps", resource: "*" },
+	no_push: { text: "The user explicitly forbids the assistant from pushing to a remote (git push).", what: "push to a remote (git push)", action: "git_push", resource: "*" },
 } as const;
+
+function mayQuestion(what: string): Question {
+	return {
+		type: "choice",
+		instructions: `According to new_user_message, may the assistant ${what}?`,
+		criteria: { forbidden: `The user does not want the assistant to ${what}`, allowed: "The user wants or allows it", unclear: "The message does not say, or cannot tell" },
+	};
+}
+
+// Asking about the user's intent beats a policy taxonomy for lifts (Jev lab: 71% → 93%, confident answers 100% right).
+export const GO_AHEAD: Question = {
+	type: "choice",
+	instructions: "Is new_user_message the user's go-ahead to start making the changes?",
+	criteria: {
+		go_ahead: "Yes: the user is telling the assistant to proceed with changes",
+		not_yet: "No: the user still wants no changes, or only some",
+		unrelated: "The message is about something else",
+		unclear: "Cannot tell",
+	},
+};
 
 export const THRESHOLDS = {
 	/** A delta choice must have this probability and confidence to be applied. */
 	delta: { p: 0.9, confidence: 0.8 },
-	/** Measured: real prohibitions 0.85+, non-constraints <=0.03. */
+	/** Add a built-in restriction when statement ≥ add, or statement ≥ addWeak and choice ≥ addChoice. */
 	add: 0.8,
+	addWeak: 0.5,
+	addChoice: 0.9,
+	/** P(go_ahead) and confidence to lift read-only. */
+	goAhead: { p: 0.9, confidence: 0.8 },
 	temporary: 0.8,
 	newTask: 0.8,
 	/** A rule-made custom prohibition below this is not a real prohibition. */
@@ -73,9 +103,17 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 		};
 	}
 	const activeKeys = new Set(input.before.map((p) => `${p.effect}|${p.action}|${p.resource}`));
-	for (const [name, d] of Object.entries(BUILTIN_DENIES)) {
-		if (!activeKeys.has(`DENY|${d.action}|${d.resource}`)) questions[`set_${name}`] = { type: "noul", instructions: d.text };
+	// Only for messages the rules found no restriction in: otherwise Jev's extra answers were cross-talk.
+	const rulesRestricted = input.createdByRules.some((p) => p.effect !== "ALLOW" && p.action !== "custom");
+	if (!rulesRestricted) {
+		for (const [name, d] of Object.entries(BUILTIN_DENIES)) {
+			if (activeKeys.has(`DENY|${d.action}|${d.resource}`)) continue;
+			questions[`set_${name}`] = { type: "noul", instructions: d.text };
+			questions[`may_${name}`] = mayQuestion(d.what);
+		}
 	}
+	const readOnly = existing.filter((p) => p.effect === "DENY" && p.action === "modify" && p.resource === "*");
+	if (readOnly.length) questions.go_ahead = GO_AHEAD;
 	questions.new_prohibition = { type: "noul", instructions: "new_user_message forbids the assistant from doing something." };
 	questions.new_permission = { type: "noul", instructions: "new_user_message gives the assistant permission to do something it was not allowed to do." };
 	if (input.createdByRules.some((p) => p.effect === "ALLOW" && p.scope === "session")) {
@@ -97,6 +135,10 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 	if (!answers) return { ...empty, ms, error };
 
 	const out: Understanding = { ...empty, ms };
+	const choiceP = (k: string, option: string) => {
+		const a = answers[k] as ChoiceAnswer | undefined;
+		return a?.type === "choice" && a.probabilities ? { p: a.probabilities[option] ?? 0, confidence: a.confidence } : undefined;
+	};
 	const noul = (k: string) => {
 		const a = answers[k] as NoulAnswer | undefined;
 		return a?.type === "noul" && typeof a.noul === "number" ? a.noul : undefined;
@@ -138,8 +180,24 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 		out.deltas[p.id] = { kind: a.choice, p: prob, confidence: a.confidence, applied };
 	}
 
+	// "Go ahead" lifts read-only, unless the rules found a scoped permission in the same message
+	// ("you can edit notes.txt only" is not a go-ahead for everything).
+	const go = choiceP("go_ahead", "go_ahead");
+	if (go) out.signals.go_ahead = go.p;
+	if (go && go.p >= THRESHOLDS.goAhead.p && go.confidence >= THRESHOLDS.goAhead.confidence && !input.createdByRules.some((c) => c.effect === "ALLOW")) {
+		for (const p of readOnly) {
+			if (out.ops.some((o) => o.op === "supersede" && o.id === p.id)) continue;
+			out.ops.push({ op: "supersede", id: p.id, reason: `go-ahead (jev p=${go.p.toFixed(2)}): "${truncate(input.message, 120)}"`, by: "jev" });
+			if (out.deltas[p.id]) out.deltas[p.id].applied = true;
+		}
+	}
+
 	for (const [name, d] of Object.entries(BUILTIN_DENIES)) {
-		if ((noul(`set_${name}`) ?? 0) >= THRESHOLDS.add && !input.createdByRules.some((p) => p.effect === "DENY" && p.action === d.action && p.resource === d.resource)) {
+		const statement = noul(`set_${name}`) ?? 0;
+		const forbidden = choiceP(`may_${name}`, "forbidden")?.p ?? 0;
+		if (forbidden) out.signals[`may_${name}`] = forbidden;
+		const add = statement >= THRESHOLDS.add || (statement >= THRESHOLDS.addWeak && forbidden >= THRESHOLDS.addChoice);
+		if (add && !input.createdByRules.some((p) => p.effect === "DENY" && p.action === d.action && p.resource === d.resource)) {
 			out.ops.push({
 				op: "add",
 				spec: { effect: "DENY", action: d.action, resource: d.resource, scope: "session", sourceQuote: truncate(input.message, 300), by: "jev", at: input.at },

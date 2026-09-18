@@ -207,12 +207,12 @@ describe("session state", () => {
 
 describe("v0.2: exceptions, understanding, speculation", () => {
 	it("a later scoped exception lets the rule-blocked call through", async () => {
-		const judge = judgeOf(async (_s, q) => ("permitted" in (q as any).criteria ? answer("permitted", 1, 0.99) : answer("complies")));
+		const judge = judgeOf(async (_s, q) => ("yes" in (q as any).criteria ? answer("yes", 1, 0.99) : answer("complies")));
 		const { pi } = track(setup({ config: { mode: "enforce" }, judge }));
 		await pi.user("Don't modify any files.");
 		await pi.user("I changed my mind for notes.txt only: append 'reviewed' to it.");
 		assert.equal(await pi.emit("tool_call", toolCall("bash", { command: "echo reviewed >> notes.txt" })), undefined);
-		assert.equal(pi.logs("gate")[0].exception.choice, "permitted");
+		assert.equal(pi.logs("gate")[0].exception.choice, "yes");
 	});
 
 	it("no later message means no exception check and a block", async () => {
@@ -224,7 +224,15 @@ describe("v0.2: exceptions, understanding, speculation", () => {
 	});
 
 	it("background understanding adds a paraphrased constraint and drops a fake one", async () => {
-		const judge = fullJudge((k) => (k === "set_read_only" ? { type: "noul", noul: 0.95 } : k.startsWith("real_") ? { type: "noul", noul: 0.02 } : { type: "noul", noul: 0.01 }));
+		const judge = fullJudge((k) =>
+			k === "set_read_only"
+				? { type: "noul", noul: 0.6 }
+				: k === "may_read_only"
+					? { type: "choice", choice: "forbidden", probabilities: { forbidden: 0.95, allowed: 0.03, unclear: 0.02 }, confidence: 0.9 }
+					: k.startsWith("real_")
+					? { type: "noul", noul: 0.02 }
+					: { type: "noul", noul: 0.01 },
+		);
 		const { pi, heed } = track(setup({ config: { mode: "enforce" }, judge }));
 		await pi.user("Keep everything exactly as it is while you look around. Don't forget to add tests later.");
 		await heed.settled();
@@ -318,7 +326,7 @@ describe("v0.3: latency", () => {
 
 	it("edit/write start the exception check once the path has streamed, before the body", async () => {
 		const seen: string[] = [];
-		const judge = judgeOf(async (_s, q) => (seen.push(Object.keys((q as any).criteria)[0]), answer("not_permitted", 1, 1)));
+		const judge = judgeOf(async (_s, q) => (seen.push(Object.keys((q as any).criteria)[0]), answer("no", 1, 1)));
 		const { pi } = track(setup({ config: { mode: "enforce" }, judge }));
 		await pi.user("Don't modify any files.");
 		await pi.user("thanks, keep going");
@@ -328,7 +336,7 @@ describe("v0.3: latency", () => {
 		assert.equal(seen.length, 0);
 		await stream(pi, tc.toolCallId, "write", { path: "src/a.ts", content: "x" }); // path final
 		await pi.flush();
-		assert.deepEqual(seen, ["permitted"]); // exception check already running
+		assert.deepEqual(seen, ["yes"]); // exception check already running
 		await stream(pi, tc.toolCallId, "write", tc.input, "toolcall_end");
 		const r = await pi.emit("tool_call", tc);
 		assert.equal(r?.block, true);
