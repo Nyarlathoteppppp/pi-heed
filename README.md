@@ -8,7 +8,7 @@ Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effect
 
 [![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1-7c5cff)](https://pi.dev)
 [![Jev](https://img.shields.io/badge/powered%20by-TypeSafe%20Jev-f5a524)](https://docs.typesafe.ai)
-[![tests](https://img.shields.io/badge/tests-55%20passing-2ea043)](#development)
+[![tests](https://img.shields.io/badge/tests-59%20passing-2ea043)](#development)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
@@ -39,7 +39,7 @@ And when you *did* change your mind — *"I've changed my mind for notes.txt onl
 
 [Jev](https://docs.typesafe.ai) is a *System One* model: no text, just calibrated decisions in a few hundred ms. pi-heed spends it where an LLM would be too slow and a regex too dumb:
 
-- **⚡ Judged while the model is still typing.** pi streams a tool call's arguments before it dispatches the call. pi-heed starts deciding at `toolcall_end`, so by the time the call reaches the gate the answer is usually waiting.
+- **⚡ Judged while the model is still typing.** pi parses tool arguments as they stream. For `edit`/`write`, the path streams before the file body, so pi-heed starts deciding once the path is complete, while the model is still writing the content. Other tools start at `toolcall_end`.
 - **🧠 One call, many questions.** Each message you send gets a single background Jev request that asks at once: *did this set read-only? forbid tests? forbid deps? lift anything? is that "don't…" sentence a real prohibition?* It catches paraphrases like *"只看不改"* or *"hands off the code"* and drops fakes like *"don't forget to add tests"*.
 - **⚖️ Second opinion before every block.** A rule wants to block? Jev first checks whether you carved out an exception for exactly this call. Only a confident *permitted* (p ≥ 0.9, confidence ≥ 0.8) gets through.
 - **🔒 Deterministic where it matters.** Side-effect detection is rules, not vibes (Jev rated *"edit changes files"* at ~0.7 — so we don't ask it that).
@@ -51,8 +51,22 @@ Measured against live `~typesafe/jev-latest` (OpenRouter):
 | Free-text constraint checks (prod API, `git push`, public API changes) | 6 / 6 correct | 235–1550 ms |
 | Exception second opinion | 3 / 3 correct | 258–417 ms |
 | Paraphrased constraints | *"只看不改"*: p ≥ 0.9 · *"hands off the code"*: 0.85 · non-constraints ≤ 0.03 | 280–980 ms |
-| In real pi: exception granted, call pre-judged while streaming | ✔ | tool call waited 189 ms |
+| In real pi: exception granted, call pre-judged at `toolcall_end` | ✔ | tool call waited 189 ms |
+| In real pi: `write` under read-only, judged from the streamed path | blocked | **tool call waited 0 ms** (Jev took 338 ms) |
 | Cost per decision | ≈ $0.000017 | |
+
+## Where the time goes
+
+Measured, so you know what pi-heed costs you:
+
+| | cost |
+|---|---|
+| pi-heed's own logic (rules, classification, extraction) | 1–46 µs |
+| Network (TLS to OpenRouter; DNS only the first time) | 15–20 ms, plus 187 ms cold DNS once. Pre-warmed at session start |
+| One Jev decision, 1 to 8 questions | median ~275 ms; question count barely matters |
+| 8 questions split into 8 parallel requests | ~650 ms, so pi-heed never splits them |
+
+Only `tool_call` can make pi wait, and only for a mutating call under an active constraint in **enforce** mode. **Shadow mode never waits**: it decides and logs in the background.
 
 ## Install
 
@@ -118,6 +132,7 @@ Semantic checks need one of:
 
 - A single message that both forbids and requests an edit (*"don't modify files; run `echo x >> f`"*) is blocked. That's deliberate: pi-heed plays it safe.
 - Shell side-effect detection is pattern-based; exotic commands can slip through.
+- The exception check leans strict: after *"don't modify any files"*, a later *"use the write tool to create poem.md"* was judged `not_permitted` (p = 0.89). Say *"you can edit now"* or add an explicit exception.
 - Jev is weak at recognising *lifts* (*"go ahead and implement it"*: p = 0.22), so lifts rely on rules plus the exception check.
 - With [pi-loop-police](https://github.com/sebaxzero/pi-loop-police) installed, identical repeats are blocked before pi-heed sees them.
 
@@ -131,7 +146,7 @@ Semantic checks need one of:
 
 ```bash
 npm install
-npm test                                        # 55 tests, no network
+npm test                                        # 59 tests, no network
 npm run typecheck
 PI_HEED_ENV_FILE=~/.env npm run smoke:jev       # live Jev check
 ```

@@ -68,6 +68,11 @@ export class FakePi {
 		await this.commands.get(name)!.handler(rest.join(" "), this.ctx());
 	}
 
+	/** Lets background work (shadow-mode decisions, understanding) finish. */
+	async flush() {
+		await new Promise((r) => setTimeout(r, 0));
+	}
+
 	logs(kind?: string) {
 		return this.entries.filter((e) => e.customType === "heed" && (!kind || e.data.kind === kind)).map((e) => e.data);
 	}

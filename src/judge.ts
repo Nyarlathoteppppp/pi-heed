@@ -34,6 +34,8 @@ export type Answer = ChoiceAnswer | NoulAnswer;
 export interface Judge {
 	readonly name: string;
 	decide(state: unknown, questions: Record<string, Question>, signal: AbortSignal): Promise<Record<string, Answer>>;
+	/** Optional: open the connection ahead of the first decision. Must never throw. */
+	warm?(): void;
 }
 
 interface Transport {
@@ -82,6 +84,14 @@ export class JevJudge implements Judge {
 		this.transport = transport;
 		this.fetchFn = fetchFn;
 		this.name = `jev(${transport.url.includes("openrouter") ? "openrouter" : "typesafe"})`;
+	}
+
+	warm(): void {
+		// Unauthenticated HEAD to the origin: resolves DNS and completes TLS so keep-alive can reuse it.
+		this.fetchFn(new URL(this.transport.url).origin, { method: "HEAD", signal: AbortSignal.timeout(3000) }).then(
+			(r) => r.body?.cancel(),
+			() => {},
+		);
 	}
 
 	async decide(state: unknown, questions: Record<string, Question>, signal: AbortSignal): Promise<Record<string, Answer>> {

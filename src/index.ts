@@ -55,6 +55,8 @@ interface JevChange {
 
 const MODES: Mode[] = ["off", "shadow", "enforce"];
 const MEMO_LIMIT = 200;
+/** Tools whose path argument streams before a (possibly long) body. */
+const PATH_FIRST_TOOLS = new Set(["edit", "write"]);
 
 function textOf(content: unknown): string {
 	if (typeof content === "string") return content;
@@ -76,7 +78,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	const repeat = new RepeatTracker(config.repeatThreshold);
 	const userMessages: string[] = [];
 	const pending = new Map<string, ToolAction>();
-	const speculative = new Map<string, { inputKey: string; decision: Promise<Decision> }>();
+	const speculative = new Map<string, { inputKey: string; decision: Promise<Decision>; early: boolean; path?: string }>();
 	const memo = new Map<string, Promise<Decision>>();
 	let understanding: Promise<void> | undefined;
 	let run = 0;
@@ -130,21 +132,24 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		status(ctx);
 	}
 
+	/** Rule block path: a rule fired, so ask Jev only whether the user carved out an exception for this call. */
+	async function ruleDecision(rule: Verdict, action: ToolAction, signal?: AbortSignal): Promise<Decision> {
+		const c = ledger.get(rule.constraintId!)!;
+		// The constraint's own message counts too ("don't edit files — except notes.txt"), unless it says nothing else.
+		const since = userMessages.slice(c.at);
+		if (since[0]?.trim() === c.quote.trim()) since.shift();
+		const x = await exceptionCheck(judge, c, since, action, config.judgeTimeoutMs, signal);
+		const exception = x.answer ? { choice: x.answer.choice, p: x.answer.probabilities[x.answer.choice] ?? 0, confidence: x.answer.confidence } : undefined;
+		if (x.permitted) return { exception, ms: x.ms };
+		return { verdict: rule, exception, error: x.error === "no judge configured" ? undefined : x.error, ms: x.ms };
+	}
+
 	/** Full gate decision for one call: rules (+ exception second opinion), then Jev for free-text constraints. */
 	async function decide(action: ToolAction, input: Record<string, unknown>, signal?: AbortSignal): Promise<Decision> {
 		const active = ledger.active();
 		if (active.length === 0) return { ms: 0 };
 		const rule = ruleCheck(active, action);
-		if (rule) {
-			const c = ledger.get(rule.constraintId!)!;
-			// The constraint's own message counts too ("don't edit files — except notes.txt"), unless it says nothing else.
-			const since = userMessages.slice(c.at);
-			if (since[0]?.trim() === c.quote.trim()) since.shift();
-			const x = await exceptionCheck(judge, c, since, action, config.judgeTimeoutMs, signal);
-			const exception = x.answer ? { choice: x.answer.choice, p: x.answer.probabilities[x.answer.choice] ?? 0, confidence: x.answer.confidence } : undefined;
-			if (x.permitted) return { exception, ms: x.ms };
-			return { verdict: rule, exception, error: x.error === "no judge configured" ? undefined : x.error, ms: x.ms };
-		}
+		if (rule) return ruleDecision(rule, action, signal);
 		const custom = active.filter((c) => c.kind === "custom");
 		if (custom.length === 0) return { ms: 0 };
 		const key = JSON.stringify([custom.map((c) => c.id), action.toolName, input]);
@@ -160,7 +165,41 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		return hit;
 	}
 
-	pi.on("session_start", (_e, ctx) => rebuild(ctx));
+	/** Logs a finished decision and says whether to block. Shared by the blocking and the background (shadow) path. */
+	function conclude(
+		d: Decision,
+		action: ToolAction,
+		ctx: ExtensionContext,
+		extra: { prejudged: boolean; waitedMs: number; stale: boolean },
+	): { block: true; reason: string } | undefined {
+		const { verdict, exception, error, ms } = d;
+		if (!verdict && !exception && !error) return;
+		const base = { kind: "gate" as const, tool: action.toolName, summary: action.summary, verdict, exception, ms, error, prejudged: extra.prejudged, waitedMs: extra.waitedMs };
+		// A result for a run that is over (Esc, new prompt) must not act on the new one.
+		if (extra.stale) {
+			log({ ...base, acted: false, stale: true });
+			return;
+		}
+		const blockable =
+			verdict?.decision === "violates" &&
+			(verdict.by === "rule" || (verdict.probability >= config.blockProbability && verdict.confidence >= config.blockConfidence));
+		const act = blockable && canIntervene();
+		log({ ...base, acted: act, budgetExhausted: blockable && config.mode === "enforce" && !act });
+		if (!blockable) return;
+		if (!act) {
+			status(ctx, config.mode === "shadow" ? `would block ${action.toolName}` : "budget spent");
+			return;
+		}
+		interventions++;
+		status(ctx, `blocked ${action.toolName}`);
+		return { block: true, reason: `[pi-heed] ${verdict!.evidence}` };
+	}
+
+	pi.on("session_start", (_e, ctx) => {
+		rebuild(ctx);
+		// Pay DNS + TLS now rather than on the first real decision (measured: 746 ms cold vs ~270 ms warm).
+		if (config.mode !== "off") judge?.warm?.();
+	});
 	pi.on("session_tree", (_e, ctx) => rebuild(ctx));
 
 	pi.on("input", (event, ctx) => {
@@ -205,17 +244,40 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		speculative.clear();
 	});
 
-	// Speculative pre-judging: the call's arguments are final at toolcall_end, but tool_call only fires
-	// after the whole assistant message has streamed. Start deciding now; don't block the stream.
+	// Speculative pre-judging. Jev costs ~250 ms per call no matter how much it is asked, so the only lever is
+	// *when* the call starts. pi parses tool arguments while they stream:
+	//  - edit/write: the rule verdict needs only the tool name and path, which stream first; the file content
+	//    that follows often takes seconds, so the exception check starts as soon as the path is complete.
+	//  - everything else: arguments are final at toolcall_end, still before tool_call fires.
 	pi.on("message_update", (event, ctx) => {
 		const e = event.assistantMessageEvent;
-		if (config.mode === "off" || e.type !== "toolcall_end") return;
+		if (config.mode === "off") return;
+		if (e.type === "toolcall_delta") {
+			const tc = e.partial.content[e.contentIndex];
+			if (tc?.type !== "toolCall" || !PATH_FIRST_TOOLS.has(tc.name) || speculative.has(tc.id)) return;
+			const args = (tc.arguments ?? {}) as Record<string, unknown>;
+			// A streamed string is only final once the model has moved on to the next key.
+			if (typeof args.path !== "string" || !Object.keys(args).some((k) => k !== "path")) return;
+			const action = classify(tc.name, { path: args.path });
+			const early = settle(understanding, config.judgeTimeoutMs).then(() => {
+				const rule = ruleCheck(ledger.active(), action);
+				return rule ? ruleDecision(rule, action, ctx.signal) : undefined;
+			});
+			early.catch(() => {});
+			speculative.set(tc.id, { inputKey: "", decision: early as Promise<Decision>, early: true, path: args.path });
+			return;
+		}
+		if (e.type !== "toolcall_end") return;
 		const { id, name, arguments: args } = e.toolCall;
 		const action = classify(name, args);
 		if (!action.mutates && action.effect !== "unknown") return;
-		const decision = settle(understanding, config.judgeTimeoutMs).then(() => decide(action, args, ctx.signal));
+		const prior = speculative.get(id);
+		const reuse = prior?.early && prior.path === args.path;
+		const decision = reuse
+			? prior!.decision.then((d) => d ?? decide(action, args, ctx.signal))
+			: settle(understanding, config.judgeTimeoutMs).then(() => decide(action, args, ctx.signal));
 		decision.catch(() => {});
-		speculative.set(id, { inputKey: JSON.stringify(args), decision });
+		speculative.set(id, { inputKey: JSON.stringify(args), decision, early: false });
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
@@ -230,38 +292,22 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		const spec = speculative.get(event.toolCallId);
 		speculative.delete(event.toolCallId);
 		// Another extension may have patched the input since it streamed; then the pre-judgement is void.
-		const prejudged = spec?.inputKey === JSON.stringify(input);
-		let d: Decision | undefined;
-		if (prejudged) d = await settle(spec!.decision, config.judgeTimeoutMs);
-		if (!d) {
-			await settle(understanding, config.judgeTimeoutMs);
-			if (ledger.active().length === 0) return;
-			d = await decide(action, input, ctx.signal);
-		}
-		const waitedMs = Date.now() - started;
-		const { verdict, exception, error, ms } = d;
-		const base = { kind: "gate" as const, tool: action.toolName, summary: action.summary, verdict, exception, ms, error, prejudged, waitedMs };
+		const prejudged = !!spec && !spec.early && spec.inputKey === JSON.stringify(input);
+		const pendingDecision: Promise<Decision | undefined> = prejudged
+			? settle(spec!.decision, config.judgeTimeoutMs)
+			: settle(understanding, config.judgeTimeoutMs).then(() => decide(action, input, ctx.signal));
 
-		// A result for a run that is over (Esc, new prompt) must not act on the new one.
-		if (myRun !== run || ctx.signal?.aborted) {
-			if (verdict || exception || error) log({ ...base, acted: false, stale: true });
+		// Shadow mode never blocks, so it never makes the tool wait: decide and log in the background.
+		if (config.mode === "shadow") {
+			pendingDecision.then(
+				(d) => d && conclude(d, action, ctx, { prejudged, waitedMs: 0, stale: myRun !== run }),
+				() => {},
+			);
 			return;
 		}
-		if (!verdict && !exception && !error) return;
-
-		const blockable =
-			verdict?.decision === "violates" &&
-			(verdict.by === "rule" || (verdict.probability >= config.blockProbability && verdict.confidence >= config.blockConfidence));
-		const act = blockable && canIntervene();
-		log({ ...base, acted: act, budgetExhausted: blockable && config.mode === "enforce" && !act });
-		if (!blockable) return;
-		if (!act) {
-			status(ctx, config.mode === "shadow" ? `would block ${action.toolName}` : "budget spent");
-			return;
-		}
-		interventions++;
-		status(ctx, `blocked ${action.toolName}`);
-		return { block: true, reason: `[pi-heed] ${verdict!.evidence}` };
+		const d = await pendingDecision;
+		if (!d) return;
+		return conclude(d, action, ctx, { prejudged, waitedMs: Date.now() - started, stale: myRun !== run || !!ctx.signal?.aborted });
 	});
 
 	pi.on("tool_result", (event, ctx) => {

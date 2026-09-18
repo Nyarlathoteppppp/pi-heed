@@ -34,7 +34,9 @@ describe("tool-call gate", () => {
 		await pi.user("Review only. Don't modify any files.");
 		const r = await pi.emit("tool_call", toolCall("edit", { path: "src/a.ts" }));
 		assert.equal(r, undefined);
+		await pi.flush();
 		const [log] = pi.logs("gate");
+		assert.equal(log.waitedMs, 0);
 		assert.equal(log.acted, false);
 		assert.equal(log.verdict.decision, "violates");
 		assert.match(pi.status!, /would block edit/);
@@ -195,6 +197,7 @@ describe("session state", () => {
 		const { pi, heed } = track(setup());
 		await pi.user("read-only");
 		await pi.emit("tool_call", toolCall("edit", { path: "a" }));
+		await pi.flush();
 		await pi.command("/heed label bad legit edit");
 		assert.equal(pi.entries.at(-1)!.customType, "heed-label");
 		await pi.command("/heed drop c1");
@@ -287,5 +290,67 @@ describe("v0.2: exceptions, understanding, speculation", () => {
 		assert.equal(heed.ledger.active().length, 0);
 		await pi.command("/heed mode enforce");
 		assert.equal(heed.ledger.active().length, 1);
+	});
+});
+
+describe("v0.3: latency", () => {
+	const stream = (pi: FakePi, id: string, name: string, args: Record<string, unknown>, type = "toolcall_delta") =>
+		pi.emit("message_update", {
+			assistantMessageEvent:
+				type === "toolcall_end"
+					? { type, contentIndex: 0, toolCall: { type: "toolCall", id, name, arguments: args } }
+					: { type, contentIndex: 0, partial: { content: [{ type: "toolCall", id, name, arguments: args }] } },
+		});
+
+	it("shadow mode never makes the tool wait, even on a slow judge", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((r) => (release = r));
+		const { pi } = track(setup({ judge: judgeOf(async () => (await gate, answer("violates"))) }));
+		await pi.user("Never call the production API");
+		const t0 = Date.now();
+		assert.equal(await pi.emit("tool_call", toolCall("bash", { command: "curl -d x https://prod" })), undefined);
+		assert.ok(Date.now() - t0 < 20);
+		release();
+		await pi.flush();
+		assert.equal(pi.logs("gate")[0].verdict.decision, "violates");
+	});
+
+	it("edit/write start the exception check once the path has streamed, before the body", async () => {
+		const seen: string[] = [];
+		const judge = judgeOf(async (_s, q) => (seen.push(Object.keys((q as any).criteria)[0]), answer("not_permitted", 1, 1)));
+		const { pi } = track(setup({ config: { mode: "enforce" }, judge }));
+		await pi.user("Don't modify any files.");
+		await pi.user("thanks, keep going");
+		const tc = toolCall("write", { path: "src/a.ts", content: "x".repeat(50) });
+		await stream(pi, tc.toolCallId, "write", { path: "src/a" }); // path still streaming: no start
+		await pi.flush();
+		assert.equal(seen.length, 0);
+		await stream(pi, tc.toolCallId, "write", { path: "src/a.ts", content: "x" }); // path final
+		await pi.flush();
+		assert.deepEqual(seen, ["permitted"]); // exception check already running
+		await stream(pi, tc.toolCallId, "write", tc.input, "toolcall_end");
+		const r = await pi.emit("tool_call", tc);
+		assert.equal(r?.block, true);
+		assert.equal(seen.length, 1); // not asked twice
+		assert.equal(pi.logs("gate")[0].prejudged, true);
+	});
+
+	it("early start falls through to the full decision when no rule fires", async () => {
+		let calls = 0;
+		const { pi } = track(setup({ config: { mode: "enforce" }, judge: judgeOf(async () => (calls++, answer("violates"))) }));
+		await pi.user("Never call the production API");
+		const tc = toolCall("write", { path: "deploy.sh", content: "curl -X POST https://prod" });
+		await stream(pi, tc.toolCallId, "write", { path: "deploy.sh", content: "" });
+		await stream(pi, tc.toolCallId, "write", tc.input, "toolcall_end");
+		assert.equal((await pi.emit("tool_call", tc))?.block, true);
+		assert.equal(calls, 1);
+	});
+
+	it("warms the judge connection at session start", async () => {
+		let warmed = 0;
+		const judge: Judge = { name: "w", decide: async () => ({}), warm: () => void warmed++ };
+		const { pi } = track(setup({ judge }));
+		await pi.emit("session_start", { reason: "startup" });
+		assert.equal(warmed, 1);
 	});
 });
