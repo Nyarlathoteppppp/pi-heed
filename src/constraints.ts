@@ -49,53 +49,70 @@ export interface IngestResult {
 	revoked: Constraint[];
 }
 
+export interface AddOptions {
+	origin: Constraint["origin"];
+	at: number;
+	by?: Constraint["by"];
+	paths?: string[];
+}
+
 export class ConstraintLedger {
 	private items: Constraint[] = [];
 	private seq = 0;
 
-	ingest(text: string, origin: Constraint["origin"] = "message"): IngestResult {
+	/** Rule-based pass over one user message. `at` is the message index. */
+	ingest(text: string, origin: Constraint["origin"] = "message", at = 0): IngestResult {
 		const result: IngestResult = { added: [], revoked: [] };
+		const opts = { origin, at };
 		for (const sentence of sentences(text)) {
 			// Revocations first, so "you can edit now, but don't touch tests" ends with only no_tests active.
-			for (const { kind, re } of REVOKE) {
-				if (!re.test(sentence)) continue;
-				for (const c of this.items) {
-					if (c.active && c.kind === kind) {
-						c.active = false;
-						result.revoked.push(c);
-					}
-				}
-			}
+			for (const { kind, re } of REVOKE) if (re.test(sentence)) result.revoked.push(...this.lift(kind));
 			let matched = false;
 			const protect = PROTECT_EN.exec(sentence) ?? PROTECT_ZH.exec(sentence);
 			if (protect && !/^tests?$/i.test(protect[1])) {
 				matched = true;
-				const c = this.add("protect_path", sentence, origin, [protect[1]]);
+				const c = this.add("protect_path", sentence, { ...opts, paths: [protect[1]] });
 				if (c) result.added.push(c);
 			}
 			for (const { kind, re } of PATTERNS) {
 				if (!re.test(sentence)) continue;
 				matched = true;
-				const c = this.add(kind, sentence, origin);
+				const c = this.add(kind, sentence, opts);
 				if (c) result.added.push(c);
 				break;
 			}
 			if (!matched && CUSTOM_DIRECTIVE.test(sentence) && !NOT_A_CONSTRAINT.test(sentence) && sentence.length <= 240) {
-				const c = this.add("custom", sentence, origin);
+				const c = this.add("custom", sentence, opts);
 				if (c) result.added.push(c);
 			}
 		}
 		return result;
 	}
 
-	add(kind: ConstraintKind, quote: string, origin: Constraint["origin"], paths?: string[]): Constraint | undefined {
+	add(kind: ConstraintKind, quote: string, opts: AddOptions): Constraint | undefined {
 		const duplicate = this.items.find(
 			(c) => c.active && c.kind === kind && (kind === "custom" || kind === "protect_path" ? c.quote === quote : true),
 		);
 		if (duplicate) return undefined;
-		const c: Constraint = { id: `c${++this.seq}`, kind, quote, active: true, origin, ...(paths ? { paths } : {}) };
+		const c: Constraint = {
+			id: `c${++this.seq}`,
+			kind,
+			quote,
+			active: true,
+			origin: opts.origin,
+			at: opts.at,
+			by: opts.by ?? "rule",
+			...(opts.paths ? { paths: opts.paths } : {}),
+		};
 		this.items.push(c);
 		return c;
+	}
+
+	/** Deactivates every active constraint of a kind; returns what was lifted. */
+	lift(kind: ConstraintKind): Constraint[] {
+		const lifted = this.items.filter((c) => c.active && c.kind === kind);
+		for (const c of lifted) c.active = false;
+		return lifted;
 	}
 
 	drop(id: string): boolean {
@@ -103,6 +120,10 @@ export class ConstraintLedger {
 		if (!c) return false;
 		c.active = false;
 		return true;
+	}
+
+	get(id: string): Constraint | undefined {
+		return this.items.find((c) => c.id === id);
 	}
 
 	active(): Constraint[] {

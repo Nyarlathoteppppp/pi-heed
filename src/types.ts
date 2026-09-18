@@ -11,6 +11,10 @@ export interface Constraint {
 	paths?: string[];
 	active: boolean;
 	origin: "message" | "command";
+	/** Index of the user message it came from (for "later messages" checks). */
+	at: number;
+	/** Who recognised it. */
+	by: "rule" | "jev";
 }
 
 export type SideEffect = "read" | "write" | "exec" | "unknown";

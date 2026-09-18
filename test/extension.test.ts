@@ -1,12 +1,24 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import type { ChoiceAnswer, Judge } from "../src/judge.ts";
+import type { Answer, ChoiceAnswer, Judge, Question } from "../src/judge.ts";
 import { type FakePi, setup, toolCall } from "./harness.ts";
 
-const answer = (choice: string, p = 0.97, confidence = 0.9): ChoiceAnswer => ({ choice, probabilities: { [choice]: p }, confidence });
+const answer = (choice: string, p = 0.97, confidence = 0.9): ChoiceAnswer => ({ type: "choice", choice, probabilities: { [choice]: p }, confidence });
 
-function judgeOf(fn: (signal: AbortSignal) => Promise<ChoiceAnswer>): Judge {
-	return { name: "fake", choice: (_s, _q, signal) => fn(signal) };
+/** Fake judge for gate questions (key "q"); background understanding calls get no answers. */
+function judgeOf(fn: (signal: AbortSignal, q: Question) => Promise<ChoiceAnswer>): Judge {
+	return {
+		name: "fake",
+		decide: async (_s, qs, signal) => ("q" in qs ? { q: await fn(signal, qs.q) } : {}) as Record<string, Answer>,
+	};
+}
+
+/** Full fake: answers every question via `fn(key, question)`. */
+function fullJudge(fn: (key: string, q: Question) => Answer | undefined): Judge {
+	return {
+		name: "fake",
+		decide: async (_s, qs) => Object.fromEntries(Object.entries(qs).flatMap(([k, q]) => { const a = fn(k, q); return a ? [[k, a]] : []; })),
+	};
 }
 
 const failing: FakePi[] = [];
@@ -85,7 +97,7 @@ describe("semantic judge (custom constraints)", () => {
 		await pi.user("Never call the production API");
 		assert.equal(await pi.emit("tool_call", toolCall("bash", { command: "curl -X POST https://api.prod/x" })), undefined);
 		next = answer("violates", 0.95, 0.9);
-		assert.equal((await pi.emit("tool_call", toolCall("bash", { command: "curl -X POST https://api.prod/x" })))?.block, true);
+		assert.equal((await pi.emit("tool_call", toolCall("bash", { command: "curl -X POST https://api.prod/y" })))?.block, true);
 	});
 
 	it("insufficient evidence is an abstention, not a block", async () => {
@@ -187,5 +199,93 @@ describe("session state", () => {
 		assert.equal(pi.entries.at(-1)!.customType, "heed-label");
 		await pi.command("/heed drop c1");
 		assert.deepEqual(heed.ledger.active(), []);
+	});
+});
+
+describe("v0.2: exceptions, understanding, speculation", () => {
+	it("a later scoped exception lets the rule-blocked call through", async () => {
+		const judge = judgeOf(async (_s, q) => ("permitted" in (q as any).criteria ? answer("permitted", 1, 0.99) : answer("complies")));
+		const { pi } = track(setup({ config: { mode: "enforce" }, judge }));
+		await pi.user("Don't modify any files.");
+		await pi.user("I changed my mind for notes.txt only: append 'reviewed' to it.");
+		assert.equal(await pi.emit("tool_call", toolCall("bash", { command: "echo reviewed >> notes.txt" })), undefined);
+		assert.equal(pi.logs("gate")[0].exception.choice, "permitted");
+	});
+
+	it("no later message means no exception check and a block", async () => {
+		let asked = 0;
+		const { pi } = track(setup({ config: { mode: "enforce" }, judge: judgeOf(async () => (asked++, answer("permitted", 1, 1))) }));
+		await pi.user("Don't modify any files.");
+		assert.equal((await pi.emit("tool_call", toolCall("write", { path: "a" })))?.block, true);
+		assert.equal(asked, 0);
+	});
+
+	it("background understanding adds a paraphrased constraint and drops a fake one", async () => {
+		const judge = fullJudge((k) => (k === "set_read_only" ? { type: "noul", noul: 0.95 } : k.startsWith("real_") ? { type: "noul", noul: 0.02 } : { type: "noul", noul: 0.01 }));
+		const { pi, heed } = track(setup({ config: { mode: "enforce" }, judge }));
+		await pi.user("只看不改。Don't forget to add tests later.");
+		await heed.settled();
+		assert.deepEqual(heed.ledger.active().map((c) => [c.kind, c.by]), [["read_only", "jev"]]);
+		assert.equal((await pi.emit("tool_call", toolCall("edit", { path: "a.ts" })))?.block, true);
+
+		// persisted: a fresh instance rebuilds the Jev-derived state without calling Jev
+		const again = setup({ judge: null });
+		again.pi.entries = pi.entries;
+		await again.pi.emit("session_start", { reason: "resume" });
+		assert.deepEqual(again.heed.ledger.active().map((c) => c.kind), ["read_only"]);
+	});
+
+	it("a tool call that beats understanding waits for it", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((r) => (release = r));
+		const judge: Judge = { name: "slow", decide: async (_s, qs) => (await gate, ("set_read_only" in qs ? { set_read_only: { type: "noul", noul: 0.99 } } : {}) as Record<string, Answer>) };
+		const { pi } = track(setup({ config: { mode: "enforce" }, judge }));
+		await pi.user("hands off the code please");
+		const call = pi.emit("tool_call", toolCall("edit", { path: "a.ts" }));
+		release();
+		assert.equal((await call)?.block, true);
+	});
+
+	it("pre-judges while streaming, so tool_call does not wait", async () => {
+		let calls = 0;
+		const { pi } = track(setup({ config: { mode: "enforce" }, judge: judgeOf(async () => (calls++, answer("violates"))) }));
+		await pi.user("Never call the production API");
+		const tc = toolCall("bash", { command: "curl -d x https://prod" });
+		await pi.emit("message_update", { assistantMessageEvent: { type: "toolcall_end", toolCall: { id: tc.toolCallId, name: tc.toolName, arguments: tc.input } } });
+		await new Promise((r) => setTimeout(r, 5));
+		const r = await pi.emit("tool_call", tc);
+		assert.equal(r?.block, true);
+		assert.equal(calls, 1);
+		assert.equal(pi.logs("gate")[0].prejudged, true);
+	});
+
+	it("re-judges when another extension patched the input", async () => {
+		const seen: string[] = [];
+		const { pi } = track(setup({ config: { mode: "enforce" }, judge: judgeOf(async () => answer("complies")) }));
+		const orig = (pi as any).api;
+		await pi.user("Never call the production API");
+		const tc = toolCall("bash", { command: "curl -d x https://staging" });
+		await pi.emit("message_update", { assistantMessageEvent: { type: "toolcall_end", toolCall: { id: tc.toolCallId, name: "bash", arguments: { command: "curl -d x https://staging" } } } });
+		const patched = { ...tc, input: { command: "curl -d x https://prod" } };
+		await pi.emit("tool_call", patched);
+		seen.push(String(pi.logs("gate")[0].prejudged));
+		assert.deepEqual(seen, ["false"]);
+		void orig;
+	});
+
+	it("identical calls are judged once (memo)", async () => {
+		let calls = 0;
+		const { pi } = track(setup({ config: { mode: "shadow" }, judge: judgeOf(async () => (calls++, answer("complies"))) }));
+		await pi.user("Never call the production API");
+		for (let i = 0; i < 3; i++) await pi.emit("tool_call", toolCall("bash", { command: "curl -d x https://h" }));
+		assert.equal(calls, 1);
+	});
+
+	it("constraints said while off are picked up when switched on", async () => {
+		const { pi, heed } = track(setup({ config: { mode: "off" } }));
+		await pi.user("Don't modify any files.");
+		assert.equal(heed.ledger.active().length, 0);
+		await pi.command("/heed mode enforce");
+		assert.equal(heed.ledger.active().length, 1);
 	});
 });

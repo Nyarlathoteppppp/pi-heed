@@ -1,15 +1,58 @@
+<div align="center">
+
 # pi-heed
 
-**Make your [pi](https://pi.dev) agent heed what you said.**
+**Your agent understood your instruction. pi-heed makes sure it still remembers.**
 
-pi-heed tracks the constraints you state in conversation — *"read-only"*, *"don't touch the tests"*, *"no new dependencies"*, *"never call the production API"* — and checks side-effecting tool calls against them **before** they run. It also flags blind retries: the same command failing with the same error while nothing changed in between.
+Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effecting tool call is checked against what you said, before it runs.
 
-Every intervention carries evidence: your own words, the pending call, and why it conflicts. Nothing is silently overridden, and pi-heed never starts a turn on its own.
+[![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1-7c5cff)](https://pi.dev)
+[![Jev](https://img.shields.io/badge/powered%20by-TypeSafe%20Jev-f5a524)](https://docs.typesafe.ai)
+[![tests](https://img.shields.io/badge/tests-55%20passing-2ea043)](#development)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+</div>
+
+---
+
+You say *"review only, don't touch anything"*. Forty tool calls and one context compaction later, the agent reaches for `write`. pi-heed stops it — with your own words as the reason:
 
 ```
 [pi-heed] User constraint c1 "Review only. Don't modify any files.". Pending call: bash: echo reviewed >> notes.txt.
 It would change files or external state. Do not apply it; describe the intended change instead, or ask the user to lift the constraint.
 ```
+
+And when you *did* change your mind — *"I've changed my mind for notes.txt only"* — it lets that one call through and keeps the rest locked.
+
+## Why it's different
+
+|  | typical guardrail | **pi-heed** |
+|---|---|---|
+| Rules come from | a static config file | **what you said in this conversation** (English & 中文) |
+| Survives context compaction | — | **yes** — constraints are rebuilt from the session, not the model's memory |
+| When it acts | after the damage, or by nagging | **before execution**, only on side effects |
+| Why it acted | "blocked" | **evidence**: your quote + the exact call + the fix |
+| Exceptions | all or nothing | *"except notes.txt"* is understood |
+| Uncertain? | guesses | **abstains** (`insufficient`) or fails open |
+
+## Built to use a fast decision model properly
+
+[Jev](https://docs.typesafe.ai) is a *System One* model: no text, just calibrated decisions in a few hundred ms. pi-heed spends it where an LLM would be too slow and a regex too dumb:
+
+- **⚡ Judged while the model is still typing.** pi streams a tool call's arguments before it dispatches the call. pi-heed starts deciding at `toolcall_end`, so by the time the call reaches the gate the answer is usually waiting.
+- **🧠 One call, many questions.** Each message you send gets a single background Jev request that asks at once: *did this set read-only? forbid tests? forbid deps? lift anything? is that "don't…" sentence a real prohibition?* It catches paraphrases like *"只看不改"* or *"hands off the code"* and drops fakes like *"don't forget to add tests"*.
+- **⚖️ Second opinion before every block.** A rule wants to block? Jev first checks whether you carved out an exception for exactly this call. Only a confident *permitted* (p ≥ 0.9, confidence ≥ 0.8) gets through.
+- **🔒 Deterministic where it matters.** Side-effect detection is rules, not vibes (Jev rated *"edit changes files"* at ~0.7 — so we don't ask it that).
+
+Measured against live `~typesafe/jev-latest` (OpenRouter):
+
+| | result | latency |
+|---|---|---|
+| Free-text constraint checks (prod API, `git push`, public API changes) | 6 / 6 correct | 235–1550 ms |
+| Exception second opinion | 3 / 3 correct | 258–417 ms |
+| Paraphrased constraints | *"只看不改"*: p ≥ 0.9 · *"hands off the code"*: 0.85 · non-constraints ≤ 0.03 | 280–980 ms |
+| In real pi: exception granted, call pre-judged while streaming | ✔ | tool call waited 189 ms |
+| Cost per decision | ≈ $0.000017 | |
 
 ## Install
 
@@ -17,74 +60,80 @@ It would change files or external state. Do not apply it; describe the intended 
 pi install git:github.com/Nyarlathoteppppp/pi-heed
 ```
 
-or try it for one session: `pi -e /path/to/pi-heed/src/index.ts`
+Rules work immediately. For the semantic layer, give it a Jev key (see below). It starts in **shadow mode**: it decides and logs, but never interferes until you say so:
 
-## Modes
+```
+/heed mode enforce
+```
 
-| Mode | Behaviour |
-|---|---|
-| `shadow` (default) | Decides and logs, never interferes. Status line shows `would block …`. |
-| `enforce` | Blocks violating tool calls; appends evidence to repeated failures. |
-| `off` | Does nothing. |
+## What it checks
 
-Switch with `/heed mode enforce` (persisted in the session) or `PI_HEED_MODE=enforce`.
-
-## How it decides
-
-| Check | Decided by | Acts when |
+| Constraint you state | Example | Decided by |
 |---|---|---|
-| read-only, no-tests, no-deps, protected path | Deterministic rules on the tool call (`edit`/`write`, mutating shell commands, package installs, test paths) | Rule matches |
-| Free-text constraints (*"never call the production API"*) | [TypeSafe Jev](https://docs.typesafe.ai) Choice: `violates` / `complies` / `insufficient` | `violates` with p ≥ 0.9 **and** confidence ≥ 0.8 |
-| Blind retry | Same normalised command + same error signature + no successful file change since | 2nd identical failure (once) |
+| Read-only | *"review only"*, *"不要改代码"*, *"hands off"* | rules + Jev |
+| Don't touch tests | *"don't touch the tests"*, *"别动测试"* | rules + Jev |
+| No new dependencies | *"no new deps"*, *"不要引入新依赖"* | rules + Jev |
+| Protected path | *"don't edit src/config.ts"*, *"别改 package.json"* | rules |
+| Anything else | *"never call the production API"*, *"don't push to GitHub"* | Jev: `violates` / `complies` / `insufficient` |
+| Blind retries | same command, same error, nothing changed | rules — appends evidence to the failing result |
 
-- Reads (`read`, `grep`, `find`, `ls`, non-mutating shell) are never checked.
-- `insufficient` is an abstention, not a block.
-- Jev errors or timeouts (2.5 s) fail open: pi behaves as if pi-heed were not installed.
-- A verdict that arrives after you pressed Esc or started a new prompt is discarded.
-- At most 3 interventions per agent run.
-- Only text you type becomes a constraint; messages injected by extensions (including pi-heed) never do. Saying *"you can edit now"* / *"现在可以改了"* lifts read-only.
+Reads (`read`, `grep`, `find`, `ls`, non-mutating shell) are never checked.
 
-Constraint extraction understands English and Chinese.
+## Safety properties
+
+- **Shadow by default.** `off` · `shadow` · `enforce`, persisted per session.
+- **Fails open.** Jev error or timeout (2.5 s) → pi behaves as if pi-heed weren't installed.
+- **Never starts a turn.** It blocks a call or annotates a result; it never re-prompts the model. Esc stays Esc.
+- **Stale-proof.** A verdict that lands after you pressed Esc or sent a new prompt is discarded.
+- **Budgeted.** At most 3 interventions per agent run.
+- **Only your words count.** Text injected by extensions (including pi-heed) never becomes a constraint.
+- **Cache-friendly.** No context rewriting; evidence rides on the blocked call or the failing result.
 
 ## Jev key
 
-Semantic checks need one of (rules work without any key):
+Semantic checks need one of:
 
-- `OPENROUTER_API_KEY` — uses `~typesafe/jev-latest` via OpenRouter's Decisions API (auto-follows the newest Jev)
-- `TYPESAFE_API_KEY` — uses `jev-latest` on api.typesafe.ai
-- `PI_HEED_ENV_FILE=/path/to/.env` — read either key from a dotenv file
-- `PI_HEED_MODEL` — pin a model version
+| Variable | Endpoint | Default model |
+|---|---|---|
+| `OPENROUTER_API_KEY` | OpenRouter Decisions API | `~typesafe/jev-latest` (follows the newest Jev) |
+| `TYPESAFE_API_KEY` | api.typesafe.ai | `jev-latest` |
+| `PI_HEED_ENV_FILE` | read either key from a dotenv file | |
+| `PI_HEED_MODEL` | pin a version | |
 
-**What is sent:** only for mutating calls when free-text constraints exist — the constraint text and the pending tool call (tool name, summary, arguments truncated to 1500 chars). Arguments can contain code; don't use free-text constraints in sessions whose edits must not leave your machine.
+**What leaves your machine** (only when a key is set): each message you type, for constraint understanding; and for mutating calls under a constraint, the constraint text plus the call (arguments truncated to 1500 chars; they can contain code).
 
 ## Commands
 
 ```
-/heed status                 mode, judge, active constraints, budget
+/heed status                     mode, judge, active constraints, budget
 /heed mode <off|shadow|enforce>
 /heed constraints
-/heed add <text>             add a free-text constraint by hand
+/heed add <text>                 add a free-text constraint by hand
 /heed drop <id>
-/heed log [n]                recent decisions on this branch
-/heed label <good|bad> [note]  label the latest decision (for threshold calibration)
+/heed log [n]                    recent decisions (with pre-judge / wait times)
+/heed label <good|bad> [note]    label the latest decision for calibration
 ```
 
-Decisions are stored as session custom entries (`heed`, `heed-label`), never sent to the model.
+## Known limitations
 
-## Known limitations (v0.1)
+- A single message that both forbids and requests an edit (*"don't modify files; run `echo x >> f`"*) is blocked. That's deliberate: pi-heed plays it safe.
+- Shell side-effect detection is pattern-based; exotic commands can slip through.
+- Jev is weak at recognising *lifts* (*"go ahead and implement it"*: p = 0.22), so lifts rely on rules plus the exception check.
+- With [pi-loop-police](https://github.com/sebaxzero/pi-loop-police) installed, identical repeats are blocked before pi-heed sees them.
 
-- Scoped exceptions aren't understood: *"I changed my mind for notes.txt only"* does not lift a read-only constraint.
-- Shell side-effect detection is pattern-based; exotic commands can slip through (and are then treated as non-mutating).
-- If [pi-loop-police](https://github.com/sebaxzero/pi-loop-police) is installed, it blocks identical repeated calls first, so pi-heed's repeat check rarely fires.
-- No rollback yet — planned as *suggest-only*, executed by you.
+## Roadmap
+
+- [ ] Suggest-only rollback to the last verified checkpoint (with [pi-rewind-hook](https://github.com/nicobailon/pi-rewind-hook))
+- [ ] Benchmark: forgotten-constraint tasks after compaction, with vs. without pi-heed
+- [ ] Threshold calibration from `/heed label` data
 
 ## Development
 
 ```bash
 npm install
-npm test            # node --test, no network
+npm test                                        # 55 tests, no network
 npm run typecheck
-PI_HEED_ENV_FILE=~/.env npm run smoke:jev   # live Jev check, 6 cases
+PI_HEED_ENV_FILE=~/.env npm run smoke:jev       # live Jev check
 ```
 
-MIT
+MIT © Nyarlathoteppppp

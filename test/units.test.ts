@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { classify } from "../src/actions.ts";
+import { pathMatches } from "../src/gate.ts";
 import { ConstraintLedger } from "../src/constraints.ts";
 import { JevJudge } from "../src/judge.ts";
 import { errorSignature, RepeatTracker } from "../src/repeat.ts";
@@ -107,20 +108,31 @@ describe("repeat tracker", () => {
 
 describe("JevJudge", () => {
 	const transport = { url: "https://openrouter.ai/api/alpha/decisions", model: "~typesafe/jev-latest", key: "k" };
-	const q = { instructions: "?", criteria: { violates: "", complies: "", insufficient: "" } };
+	const q = { q: { type: "choice" as const, instructions: "?", criteria: { violates: "", complies: "", insufficient: "" } } };
 	const fake = (body: unknown, status = 200) => (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch;
 
 	it("parses a choice answer", async () => {
 		const j = new JevJudge(transport, fake({ answers: { q: { type: "choice", choice: "complies", probabilities: { complies: 0.9 }, confidence: 0.7 } } }));
-		const a = await j.choice({}, q, new AbortController().signal);
-		assert.equal(a.choice, "complies");
+		const a = await j.decide({}, q, new AbortController().signal);
+		assert.equal((a.q as any).choice, "complies");
 	});
 	it("rejects an option it did not offer", async () => {
 		const j = new JevJudge(transport, fake({ answers: { q: { choice: "maybe", probabilities: {}, confidence: 1 } } }));
-		await assert.rejects(j.choice({}, q, new AbortController().signal), /malformed/);
+		await assert.rejects(j.decide({}, q, new AbortController().signal), /malformed/);
 	});
 	it("throws on http errors", async () => {
 		const j = new JevJudge(transport, fake({}, 429));
-		await assert.rejects(j.choice({}, q, new AbortController().signal), /429/);
+		await assert.rejects(j.decide({}, q, new AbortController().signal), /429/);
+	});
+});
+
+describe("pathMatches", () => {
+	it("matches on segment boundaries only", () => {
+		assert.equal(pathMatches("src/a.ts", "a.ts"), true);
+		assert.equal(pathMatches("src/data.ts", "a.ts"), false);
+		assert.equal(pathMatches("./package.json", "package.json"), true);
+		assert.equal(pathMatches("src/legacy/x.ts", "src/legacy/"), true);
+		assert.equal(pathMatches("lib/src/legacy/x.ts", "src/legacy"), true);
+		assert.equal(pathMatches("src/legacyish.ts", "src/legacy"), false);
 	});
 });

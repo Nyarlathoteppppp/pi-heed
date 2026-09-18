@@ -1,5 +1,5 @@
 import { TEST_PATH, truncate } from "./actions.ts";
-import { ask, type Judge } from "./judge.ts";
+import { type ChoiceAnswer, type ChoiceQuestion, ask, type Judge } from "./judge.ts";
 import type { Constraint, ToolAction, Verdict } from "./types.ts";
 
 function quoteOf(c: Constraint): string {
@@ -17,6 +17,13 @@ function violation(c: Constraint, action: ToolAction, why: string, remedy: strin
 	};
 }
 
+/** True when `path` is `frag` or ends with it on a path-segment boundary ("a.ts" matches "src/a.ts", not "data.ts"). */
+export function pathMatches(path: string, frag: string): boolean {
+	const p = path.replace(/^\.\//, "");
+	const f = frag.replace(/^\.\//, "").replace(/\/$/, "");
+	return p === f || p.endsWith(`/${f}`) || p.startsWith(`${f}/`) || p.includes(`/${f}/`);
+}
+
 /** Deterministic checks for the constraint kinds rules can decide on their own. */
 export function ruleCheck(constraints: Constraint[], action: ToolAction): Verdict | undefined {
 	if (!action.mutates) return undefined;
@@ -31,7 +38,7 @@ export function ruleCheck(constraints: Constraint[], action: ToolAction): Verdic
 				if (action.paths.some((p) => TEST_PATH.test(p))) return violation(c, action, "modify test files", "Leave the tests unchanged; fix the code under test instead, or ask the user.");
 				break;
 			case "protect_path": {
-				const hit = action.paths.find((p) => c.paths?.some((frag) => p === frag || p.endsWith(`/${frag}`) || p.includes(frag)));
+				const hit = action.paths.find((p) => c.paths?.some((frag) => pathMatches(p, frag)));
 				if (hit) return violation(c, action, `modify ${hit}`, "Leave that path unchanged, or ask the user.");
 				break;
 			}
@@ -40,7 +47,8 @@ export function ruleCheck(constraints: Constraint[], action: ToolAction): Verdic
 	return undefined;
 }
 
-export const CUSTOM_QUESTION = {
+export const CUSTOM_QUESTION: ChoiceQuestion = {
+	type: "choice",
 	instructions:
 		"Would executing pending_tool_call break any of the user's explicit constraints? Judge only against the constraints listed; necessary investigation or unrelated work is not a violation.",
 	criteria: {
@@ -50,10 +58,25 @@ export const CUSTOM_QUESTION = {
 	},
 };
 
+export const EXCEPTION_QUESTION: ChoiceQuestion = {
+	type: "choice",
+	instructions:
+		"Do the user messages since the constraint was stated (including the one that stated it) explicitly permit this specific pending call, for example by making an exception for this file or this command?",
+	criteria: {
+		permitted: "A user message explicitly allows this specific action",
+		not_permitted: "No user message allows this action; the constraint still applies to it",
+		unclear: "The messages are ambiguous about this action",
+	},
+};
+
 export interface JudgedCheck {
 	verdict?: Verdict;
 	error?: string;
 	ms: number;
+}
+
+function probOf(a: ChoiceAnswer): number {
+	return a.probabilities[a.choice] ?? 0;
 }
 
 /** Semantic check of free-text ("custom") constraints. Returns no verdict on any failure. */
@@ -71,20 +94,52 @@ export async function judgeCheck(
 		user_constraints: custom.map((c) => ({ id: c.id, text: c.quote })),
 		pending_tool_call: { tool: action.toolName, summary: action.summary, input: truncate(JSON.stringify(input), 1500) },
 	};
-	const { answer, error, ms } = await ask(judge, state, CUSTOM_QUESTION, timeoutMs, signal);
+	const { answers, error, ms } = await ask(judge, state, { q: CUSTOM_QUESTION }, timeoutMs, signal);
+	const answer = answers?.q as ChoiceAnswer | undefined;
 	if (!answer) return { error, ms };
 	const decision = answer.choice as Verdict["decision"];
 	return {
 		ms,
 		verdict: {
 			decision,
-			probability: answer.probabilities[decision] ?? 0,
+			probability: probOf(answer),
 			confidence: answer.confidence,
 			by: "jev",
 			evidence:
 				`User constraints ${custom.map(quoteOf).join("; ")}. Pending call: ${action.summary}. ` +
-				`Judge: ${decision} (p=${(answer.probabilities[decision] ?? 0).toFixed(2)}, confidence=${answer.confidence.toFixed(2)}). ` +
+				`Judge: ${decision} (p=${probOf(answer).toFixed(2)}, confidence=${answer.confidence.toFixed(2)}). ` +
 				"If the call is needed, explain why it does not conflict, or ask the user.",
 		},
 	};
+}
+
+export interface ExceptionCheck {
+	permitted: boolean;
+	answer?: ChoiceAnswer;
+	error?: string;
+	ms: number;
+}
+
+/**
+ * Second opinion before a rule-based block: did the user later carve out an exception for exactly this
+ * action ("I changed my mind for notes.txt")? Only a confident "permitted" lets the call through.
+ */
+export async function exceptionCheck(
+	judge: Judge | undefined,
+	constraint: Constraint,
+	laterUserMessages: string[],
+	action: ToolAction,
+	timeoutMs: number,
+	signal?: AbortSignal,
+): Promise<ExceptionCheck> {
+	if (!judge || laterUserMessages.length === 0) return { permitted: false, ms: 0 };
+	const state = {
+		constraint: constraint.quote,
+		user_messages_since_constraint: laterUserMessages.map((m) => truncate(m, 600)),
+		pending_tool_call: action.summary,
+	};
+	const { answers, error, ms } = await ask(judge, state, { q: EXCEPTION_QUESTION }, timeoutMs, signal);
+	const answer = answers?.q as ChoiceAnswer | undefined;
+	if (!answer) return { permitted: false, error, ms };
+	return { permitted: answer.choice === "permitted" && probOf(answer) >= 0.9 && answer.confidence >= 0.8, answer, ms };
 }

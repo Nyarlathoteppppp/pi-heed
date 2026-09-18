@@ -1,20 +1,39 @@
 import { readFileSync } from "node:fs";
 
+export interface ChoiceQuestion {
+	type: "choice";
+	instructions: string;
+	criteria: Record<string, string>;
+}
+
+export interface NoulQuestion {
+	type: "noul";
+	instructions: string;
+}
+
+export type Question = ChoiceQuestion | NoulQuestion;
+
 export interface ChoiceAnswer {
+	type: "choice";
 	choice: string;
 	probabilities: Record<string, number>;
 	confidence: number;
 }
 
-export interface ChoiceQuestion {
-	instructions: string;
-	criteria: Record<string, string>;
+export interface NoulAnswer {
+	type: "noul";
+	noul: number;
 }
 
-/** A narrow decision oracle. Implementations must throw (not guess) on failure; callers fail open. */
+export type Answer = ChoiceAnswer | NoulAnswer;
+
+/**
+ * A narrow decision oracle. One call may carry many questions (Jev answers them in one pass).
+ * Implementations must throw (not guess) on failure; callers fail open.
+ */
 export interface Judge {
 	readonly name: string;
-	choice(state: unknown, question: ChoiceQuestion, signal: AbortSignal): Promise<ChoiceAnswer>;
+	decide(state: unknown, questions: Record<string, Question>, signal: AbortSignal): Promise<Record<string, Answer>>;
 }
 
 interface Transport {
@@ -48,6 +67,12 @@ export function resolveTransport(env: NodeJS.ProcessEnv = process.env): Transpor
 	return undefined;
 }
 
+function validAnswer(q: Question, a: any): a is Answer {
+	if (!a || typeof a !== "object") return false;
+	if (q.type === "noul") return typeof a.noul === "number";
+	return typeof a.choice === "string" && a.choice in q.criteria && typeof a.confidence === "number" && !!a.probabilities;
+}
+
 export class JevJudge implements Judge {
 	readonly name: string;
 	private readonly transport: Transport;
@@ -59,7 +84,7 @@ export class JevJudge implements Judge {
 		this.name = `jev(${transport.url.includes("openrouter") ? "openrouter" : "typesafe"})`;
 	}
 
-	async choice(state: unknown, question: ChoiceQuestion, signal: AbortSignal): Promise<ChoiceAnswer> {
+	async decide(state: unknown, questions: Record<string, Question>, signal: AbortSignal): Promise<Record<string, Answer>> {
 		const res = await this.fetchFn(this.transport.url, {
 			method: "POST",
 			headers: {
@@ -67,40 +92,39 @@ export class JevJudge implements Judge {
 				"Content-Type": "application/json",
 				"X-Title": "pi-heed",
 			},
-			body: JSON.stringify({
-				model: this.transport.model,
-				state,
-				questions: { q: { type: "choice", instructions: question.instructions, criteria: question.criteria } },
-			}),
+			body: JSON.stringify({ model: this.transport.model, state, questions }),
 			signal,
 		});
 		if (!res.ok) throw new Error(`jev http ${res.status}`);
-		const body = (await res.json()) as { answers?: { q?: Partial<ChoiceAnswer> } };
-		const a = body.answers?.q;
-		if (!a || typeof a.choice !== "string" || !(a.choice in question.criteria) || typeof a.confidence !== "number" || !a.probabilities) {
-			throw new Error("jev: malformed answer");
+		const body = (await res.json()) as { answers?: Record<string, unknown> };
+		const out: Record<string, Answer> = {};
+		for (const [key, q] of Object.entries(questions)) {
+			const a = body.answers?.[key];
+			if (!validAnswer(q, a)) throw new Error(`jev: malformed answer for ${key}`);
+			out[key] = { ...(a as Answer), type: q.type } as Answer;
 		}
-		return { choice: a.choice, probabilities: a.probabilities, confidence: a.confidence };
+		return out;
 	}
 }
 
-/** Runs a judge call with a hard deadline; returns undefined on timeout, abort or error (fail open). */
+/** Runs a judge call with a hard deadline; returns no answers on timeout, abort or error (fail open). */
 export async function ask(
 	judge: Judge | undefined,
 	state: unknown,
-	question: ChoiceQuestion,
+	questions: Record<string, Question>,
 	timeoutMs: number,
 	outer?: AbortSignal,
-): Promise<{ answer?: ChoiceAnswer; error?: string; ms: number }> {
+): Promise<{ answers?: Record<string, Answer>; error?: string; ms: number }> {
 	const started = Date.now();
 	if (!judge) return { error: "no judge configured", ms: 0 };
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(new Error("timeout")), timeoutMs);
 	const onOuter = () => controller.abort(new Error("aborted"));
+	if (outer?.aborted) onOuter();
 	outer?.addEventListener("abort", onOuter, { once: true });
 	try {
-		const answer = await judge.choice(state, question, controller.signal);
-		return { answer, ms: Date.now() - started };
+		const answers = await judge.decide(state, questions, controller.signal);
+		return { answers, ms: Date.now() - started };
 	} catch (e) {
 		const reason = controller.signal.aborted ? String((controller.signal.reason as Error)?.message ?? "aborted") : String((e as Error)?.message ?? e);
 		return { error: reason, ms: Date.now() - started };
@@ -108,4 +132,16 @@ export async function ask(
 		clearTimeout(timer);
 		outer?.removeEventListener("abort", onOuter);
 	}
+}
+
+/** Waits for a promise at most `ms`; resolves undefined on timeout. Never rejects. */
+export function settle<T>(p: Promise<T> | undefined, ms: number): Promise<T | undefined> {
+	if (!p) return Promise.resolve(undefined);
+	return new Promise((resolve) => {
+		const t = setTimeout(() => resolve(undefined), ms);
+		p.then(
+			(v) => (clearTimeout(t), resolve(v)),
+			() => (clearTimeout(t), resolve(undefined)),
+		);
+	});
 }
