@@ -138,3 +138,16 @@ describe("rules: paths at the end of a sentence", () => {
 		assert.equal((ops[0] as any).spec.resource, "src/auth/token.ts");
 	});
 });
+
+describe("rules: 别 is not always a prohibition (real session)", () => {
+	const kindsOfText = (t: string) => kindsOf(ledger(t));
+	it("别人 / 区别 / 特别 are not prohibitions", () => {
+		assert.deepEqual(kindsOfText("刚才别人问风雪驱动炸了为什么她不回复"), []);
+		assert.deepEqual(kindsOfText("这两个方案有什么区别"), []);
+		assert.deepEqual(kindsOfText("这个特别重要，看一下"), []);
+	});
+	it("别 before a verb still is", () => {
+		assert.deepEqual(kindsOfText("别动测试"), ["no_tests"]);
+		assert.deepEqual(kindsOfText("别改 package.json"), ["protect_path"]);
+	});
+});

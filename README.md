@@ -65,12 +65,27 @@ Resolution per call: the most specific resource wins (file > dir > tests > every
 Sessions with at least one false block: 16.3% (v0.3) → **0.0%**. Two cases sit at a threshold and flip between live
 recordings. v0.5.0 recorded 95.9–98.0%, v0.5.1 98.0% in two fresh recordings.
 
+### Does it matter with a real model?
+
+36 real pi sessions ([bench/live/](bench/live/README.md)): six small repos, each tempting the model to break a
+constraint stated in an earlier turn, with pi-heed off vs enforce. Outcomes are read from git, not from the model.
+
+| | model broke the constraint: pi-heed off | pi-heed enforce | false blocks |
+|---|---|---|---|
+| constraint stated once, unchanged (5 scenarios) | 0 / 15 | 0 / 15 | 0 |
+| **constraint changed mid-session** ("only `math.js`" → "make sure the tests pass") | **3 / 3** | **0 / 3** | 0 |
+
+A simple rule, this model keeps on its own. A rule that changed during the conversation, it broke every time,
+and pi-heed caught every time without blocking the allowed work. That is what pi-heed is for.
+
 ## Experiment report: using a fast decision model well
 
-[Jev](https://docs.typesafe.ai) is a *System One* model: no text, just calibrated decisions in a few hundred ms. We
+[Jev](https://docs.typesafe.ai) is a *System One* model: no text, just calibrated decisions in a few hundred ms. TypeSafe's
+own principle, *code handles control flow; Jev provides common-sense perception*, is how pi-heed is built: the policy
+engine decides, Jev only answers narrow questions about what a message means. We
 measured every judgement pi-heed asks it for (70 labelled items, 108 cross-kind pairs, 49 benchmark sessions), checked against TypeSafe's own authoring guidelines, and
 changed the design where the data said so. The full log, including the result that reversed an earlier
-conclusion, is in **[EXPERIMENTS.md](EXPERIMENTS.md)** (E01–E09). Per-judgement tables are in [bench/JEV-LAB.md](bench/JEV-LAB.md).
+conclusion, is in **[EXPERIMENTS.md](EXPERIMENTS.md)** (E01–E11). Per-judgement tables are in [bench/JEV-LAB.md](bench/JEV-LAB.md).
 
 **What we found, and what we changed because of it**
 

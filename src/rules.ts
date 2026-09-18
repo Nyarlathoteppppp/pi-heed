@@ -11,7 +11,9 @@ interface Target {
 const NOT_A_POLICY = /don'?t worry|don'?t know|don'?t forget|never mind(?!.*(?:permission|allow|exception))|别担心|不要紧|别客气|别急|别忘了|不要忘了?|记得/i;
 
 const NEG_EN = /\b(?:don'?t|do not|never|must not|mustn'?t|shouldn'?t|should not|cannot|can'?t|no longer|stop|avoid)\b|\bno\s+(?:new\s+|more\s+)?(?:changes|edits|modifications|deps|dependencies|packages|pushing|push(?:es)?|commits?)\b|\bleave\b.+\balone\b|\bhands off\b|\bread[- ]only\b|\b(?:only|just) (?:review|look|read)\b/i;
-const NEG_ZH = /不要|别|不许|不准|禁止|不能|不可以|不得|切勿|请勿|只读|只看|不用改|保持不变/;
+// 别 is only a prohibition before a verb: not in 别人 / 别的 / 别处 (others) or 区别 / 特别 / 识别 / 类别 … (real session: E10)
+const BIE = "(?<![区特识类级差性告分派辨鉴甄判])别(?![人的处名墅致扭具])";
+const NEG_ZH = new RegExp(`不要|${BIE}|不许|不准|禁止|不能|不可以|不得|切勿|请勿|只读|只看|不用改|保持不变`);
 const ALLOW_EN =
 	/\b(?:you can|you may|feel free to|go ahead|it'?s (?:fine|ok|okay)|is (?:fine|ok|okay)|are (?:fine|ok|okay)|are allowed|is allowed|allowed to|permission to|now (?:edit|fix|implement|apply|change|modify|write))\b|\b(?:apply|make) (?:the )?(?:fix|fixes|changes)\b/i;
 const ALLOW_ZH = /(?<![不别])可以|允许|没问题|随便|放开|解禁|(?:现在|开始|直接|去)(?:改|修|动手|写|实现)/;
