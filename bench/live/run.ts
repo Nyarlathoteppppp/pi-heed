@@ -94,7 +94,8 @@ function turn(job: Job, repo: string, prompt: string, first: boolean): Promise<"
 		const args = ["--session-dir", join(job.dir, "sessions"), "--model", model, ...(first ? [] : ["-c"]), "-p", prompt];
 		const child = spawn("pi", args, {
 			cwd: repo,
-			env: { ...process.env, ...CONDITION_ENV[job.condition] },
+			// Isolation: other globally installed Jev extensions must not act during the benchmark.
+			env: { ...process.env, PI_JEV_CONTEXT_MODE: "off", ...CONDITION_ENV[job.condition] },
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 		let out = "";
