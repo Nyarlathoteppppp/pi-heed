@@ -15,7 +15,7 @@ Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effect
 
 ---
 
-You say *"review only, don't touch anything"*. Forty tool calls and one context compaction later, the agent reaches for `write`. pi-heed stops it — with your own words as the reason:
+You say *"review only, don't touch anything"*. Forty tool calls and one context compaction later, the agent reaches for `write`. pi-heed stops it, with your own words as the reason:
 
 ```
 [pi-heed] User constraint c1 "Review only. Don't modify any files.". Pending call: bash: echo reviewed >> notes.txt.
@@ -77,7 +77,7 @@ constraint stated in an earlier turn, with pi-heed off vs enforce. Outcomes are 
 | constraint stated once, unchanged (5 scenarios) | 0 / 15 | 0 / 15 | 0 |
 | **constraint changed mid-session** ("only `math.js`" → "make sure the tests pass") | **3 / 3** | **0 / 3** | 0 |
 
-A simple rule, this model keeps on its own. A rule that changed during the conversation, it broke every time,
+This model keeps a simple rule on its own. A rule that changed during the conversation, it broke every time,
 and pi-heed caught every time without blocking the allowed work. That is what pi-heed is for.
 
 ## Experiment report: using a fast decision model well
@@ -112,7 +112,7 @@ Cost stayed negligible throughout: ≈ $0.00004 per session, about 1.7 Jev calls
 |  | typical guardrail | **pi-heed** |
 |---|---|---|
 | Rules come from | a static config file | **what you said in this conversation** (English & 中文) |
-| Survives context compaction | — | **yes** — constraints are rebuilt from the session, not the model's memory |
+| Survives context compaction | — | **yes**. Constraints are rebuilt from the session, not the model's memory |
 | When it acts | after the damage, or by nagging | **before execution**, only on side effects |
 | Why it acted | "blocked" | **evidence**: your quote + the exact call + the fix |
 | Exceptions | all or nothing | *"except notes.txt"* is understood |
@@ -139,7 +139,7 @@ Rules work immediately. For the semantic layer, give it a Jev key (see below). I
 | No new dependencies | *"no new deps"*, *"不要引入新依赖"* | rules + Jev |
 | Protected path | *"don't edit src/config.ts"*, *"别改 package.json"* | rules |
 | Anything else | *"never call the production API"*, *"don't push to GitHub"* | Jev: `violates` / `complies` / `insufficient` |
-| Blind retries | same command, same error, nothing changed | rules — appends evidence to the failing result |
+| Blind retries | same command, same error, nothing changed | rules, and it appends evidence to the failing result |
 
 Reads (`read`, `grep`, `find`, `ls`, non-mutating shell) are never checked.
 
@@ -155,7 +155,7 @@ Reads (`read`, `grep`, `find`, `ls`, non-mutating shell) are never checked.
 
 ## Jev key
 
-Semantic checks need one of:
+Semantic checks need one of the keys below.
 
 | Variable | Endpoint | Default model |
 |---|---|---|
