@@ -294,3 +294,21 @@ export function describe(p: Policy): string {
 	const pre = p.prerequisite ? ` unless ${p.prerequisite} ran first` : "";
 	return `${p.effect} ${what}${pre} (${p.scope})`;
 }
+
+/** Plain-language line for the system prompt: what the model may or may not do, in the user's own words. */
+export function plain(p: Policy): string {
+	const where = (r: string) => (r === "*" ? "files" : r === "tests" ? "test files" : r);
+	const scope = p.scope === "once" ? " (this once)" : p.scope === "run" ? " (for this request)" : "";
+	switch (p.effect) {
+		case "ALLOW":
+			return `Allowed: ${p.action === "modify" ? `modify ${where(p.resource)}` : p.action.replace("_", " ")}${scope}`;
+		case "REQUIRE_CONFIRMATION":
+			return `Ask the user before you ${p.action === "modify" ? `modify ${where(p.resource)}` : p.action.replace("_", " ")}`;
+		case "REQUIRE_BEFORE":
+			return `Before ${p.action.replace("_", " ")}: run the ${p.prerequisite} and make no changes after they pass`;
+		default:
+			if (p.action === "custom") return `Do not: ${p.resource}`;
+			if (p.action === "modify") return `Do not modify ${where(p.resource)}${scope}`;
+			return `Do not ${p.action === "install_deps" ? "add dependencies" : p.action.replace("_", " ")}${scope}`;
+	}
+}

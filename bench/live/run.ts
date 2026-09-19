@@ -12,9 +12,18 @@ import { SCENARIOS, type Helpers, type Scenario } from "./scenarios.ts";
 const exec = promisify(execCb);
 const arg = (n: string, d?: string) => (process.argv.includes(`--${n}`) ? process.argv[process.argv.indexOf(`--${n}`) + 1] : d);
 const reps = Number(arg("reps", "3"));
+/** reps for scenarios where the policy changes mid-session (pi-heed's target) */
+const repsChanging = Number(arg("reps-changing", arg("reps", "3")));
+const model = arg("model", "antigravity/gemini-3.8-flash")!;
+/** condition → environment: "inform" = enforce + rules in the system prompt */
+const CONDITION_ENV: Record<string, Record<string, string>> = {
+	off: { PI_HEED_MODE: "off" },
+	enforce: { PI_HEED_MODE: "enforce", PI_HEED_INFORM: "0" },
+	inform: { PI_HEED_MODE: "enforce", PI_HEED_INFORM: "1" },
+};
 const parallel = Number(arg("parallel", "3"));
 const only = arg("only")?.split(",");
-const conditions = (arg("conditions", "off,enforce") as string).split(",");
+const conditions = (arg("conditions", "off,enforce,inform") as string).split(",");
 const turnTimeout = Number(arg("timeout", "240")) * 1000;
 const root = arg("root", join(process.env.TMPDIR ?? "/tmp", "pi-heed-live"))!;
 const outPath = arg("out", join(dirname(new URL(import.meta.url).pathname), "results.json"))!;
@@ -29,6 +38,9 @@ interface Result {
 	scenario: string;
 	condition: string;
 	rep: number;
+	/** provider/model the session actually used, read from the session file */
+	model?: string;
+	/** what the model did that broke the constraint (from git and the calls that actually ran), or false */
 	violated: string | false;
 	succeeded: boolean;
 	blocked: string[];
@@ -79,10 +91,10 @@ function sessionLines(dir: string): number {
 function turn(job: Job, repo: string, prompt: string, first: boolean): Promise<"ok" | "hang" | "timeout"> {
 	const before = sessionLines(job.dir);
 	return new Promise((resolve) => {
-		const args = ["--session-dir", join(job.dir, "sessions"), ...(first ? [] : ["-c"]), "-p", prompt];
+		const args = ["--session-dir", join(job.dir, "sessions"), "--model", model, ...(first ? [] : ["-c"]), "-p", prompt];
 		const child = spawn("pi", args, {
 			cwd: repo,
-			env: { ...process.env, PI_HEED_MODE: job.condition },
+			env: { ...process.env, ...CONDITION_ENV[job.condition] },
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 		let out = "";
@@ -128,13 +140,27 @@ async function runJob(job: Job): Promise<Result> {
 		read: (p) => (existsSync(join(repo, p)) ? readFileSync(join(repo, p), "utf8") : undefined),
 		exists: (p) => existsSync(join(repo, p)),
 		sh: (cmd) => sh(cmd, repo),
+		executed: () => executed,
 	};
 	const blocked: string[] = [];
 	let heedDecisions = 0;
+	const models = new Set<string>();
+	const executed: Array<{ tool: string; input: Record<string, any>; turn: number }> = [];
 	const f = sessionFile(job.dir);
 	if (f) {
+		const calls = new Map<string, { tool: string; input: Record<string, any>; turn: number }>();
+		let turnNo = 0;
 		for (const line of readFileSync(f, "utf8").split("\n").filter(Boolean)) {
 			const e = JSON.parse(line);
+			if (e.type === "message") {
+				const m = e.message;
+				if (m.role === "user") turnNo++;
+				if (m.role === "assistant") {
+					if (m.provider) models.add(`${m.provider}/${m.model}`);
+					for (const part of m.content ?? []) if (part.type === "toolCall") calls.set(part.id, { tool: part.name, input: part.arguments ?? {}, turn: turnNo });
+				}
+				if (m.role === "toolResult" && !m.isError && calls.has(m.toolCallId)) executed.push(calls.get(m.toolCallId)!);
+			}
 			if (e.type === "custom" && e.customType === "heed" && e.data?.kind === "gate") {
 				heedDecisions++;
 				if (e.data.acted) blocked.push(`${e.data.summary}  [${e.data.policy ?? e.data.verdict?.by}]`);
@@ -145,6 +171,7 @@ async function runJob(job: Job): Promise<Result> {
 		scenario: job.scenario.id,
 		condition: job.condition,
 		rep: job.rep,
+		model: [...models].join(","),
 		violated: await job.scenario.violated(h),
 		succeeded: await job.scenario.succeeded(h),
 		blocked,
@@ -158,12 +185,12 @@ async function runJob(job: Job): Promise<Result> {
 
 const jobs: Job[] = [];
 for (const s of SCENARIOS.filter((s) => !only || only.includes(s.id)))
-	for (let rep = 1; rep <= reps; rep++) for (const condition of conditions) jobs.push({ scenario: s, condition, rep, dir: join(root, `${s.id}-${condition}-${rep}`) });
+	for (let rep = 1; rep <= (s.changing ? repsChanging : reps); rep++) for (const condition of conditions) jobs.push({ scenario: s, condition, rep, dir: join(root, `${s.id}-${condition}-${rep}`) });
 
 const results: Result[] = existsSync(outPath) && process.argv.includes("--resume") ? JSON.parse(readFileSync(outPath, "utf8")) : [];
 const done = new Set(results.map((r) => `${r.scenario}-${r.condition}-${r.rep}`));
 const queue = jobs.filter((j) => !done.has(`${j.scenario.id}-${j.condition}-${j.rep}`));
-console.log(`${queue.length} runs, ${parallel} at a time, sandboxes in ${root}`);
+console.log(`${queue.length} runs, ${parallel} at a time, model ${model}, sandboxes in ${root}`);
 
 async function worker() {
 	for (let job = queue.shift(); job; job = queue.shift()) {

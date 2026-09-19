@@ -415,3 +415,66 @@ describe("v0.6: real-session fixes", () => {
 		assert.equal(asked.filter((k) => k === "q").length, 1); // only deploy was judged
 	});
 });
+
+describe("v0.7: inform, speed bump, review", () => {
+	const start = (pi: FakePi) => pi.emit("before_agent_start", { prompt: "x", systemPrompt: "BASE" });
+
+	it("inform appends the active rules in the user's words, and is stable while the policy is", async () => {
+		const { pi } = setup({ config: { mode: "enforce", inform: true }, judge: null });
+		assert.equal(await start(pi), undefined); // no policy yet
+		await pi.user("src 不能改，但 src/auth 可以");
+		const a = await start(pi);
+		assert.match(a.systemPrompt, /^BASE\n\n## Rules the user set/);
+		assert.match(a.systemPrompt, /Do not modify src\. The user said: "src 不能改，但 src\/auth 可以"/);
+		assert.match(a.systemPrompt, /Allowed: modify src\/auth/);
+		assert.equal((await start(pi)).systemPrompt, a.systemPrompt); // unchanged policy → identical prompt (cache-safe)
+	});
+
+	it("inform is off by default and in off mode", async () => {
+		const a = setup({ config: { mode: "enforce" }, judge: null });
+		await a.pi.user("Don't modify any files.");
+		assert.equal(await start(a.pi), undefined);
+		const b = setup({ config: { mode: "off", inform: true }, judge: null });
+		await b.pi.user("Don't modify any files.");
+		assert.equal(await start(b.pi), undefined);
+	});
+
+	it("speed bump: an unsure violation stops the first attempt, an identical retry goes through", async () => {
+		const judge: Judge = { name: "f", decide: async (_s, qs): Promise<Record<string, Answer>> => ("q" in qs ? { q: choice("violates", 0.8, 0.7) } : {}) };
+		const { pi } = setup({ config: { mode: "enforce", bumpProbability: 0.7 }, judge });
+		await pi.user("Don't send any notifications.");
+		const call = { command: "curl -X POST https://hooks.slack.com/x -d '{}'" };
+		const first = await pi.emit("tool_call", toolCall("bash", call));
+		assert.equal(first?.block, true);
+		assert.match(first.reason, /Check with the user/);
+		assert.equal(await pi.emit("tool_call", toolCall("bash", call)), undefined);
+		assert.equal((await pi.emit("tool_call", toolCall("bash", { command: "curl -X POST https://hooks.slack.com/y -d '{}'" })))?.block, true); // different call: bumped again
+	});
+
+	it("speed bump never softens a confident or rule-based block, and is off by default", async () => {
+		const judge: Judge = { name: "f", decide: async (_s, qs): Promise<Record<string, Answer>> => ("q" in qs ? { q: choice("violates", 0.97, 0.9) } : {}) };
+		const a = setup({ config: { mode: "enforce", bumpProbability: 0.7 }, judge });
+		await a.pi.user("Don't send any notifications.");
+		for (let i = 0; i < 2; i++) assert.equal((await a.pi.emit("tool_call", toolCall("bash", { command: "curl -d x https://hooks.slack.com/x" })))?.block, true);
+		const unsure: Judge = { name: "f", decide: async (_s, qs): Promise<Record<string, Answer>> => ("q" in qs ? { q: choice("violates", 0.8, 0.7) } : {}) };
+		const b = setup({ config: { mode: "enforce" }, judge: unsure });
+		await b.pi.user("Don't send any notifications.");
+		assert.equal(await b.pi.emit("tool_call", toolCall("bash", { command: "curl -d x https://hooks.slack.com/x" })), undefined);
+	});
+
+	it("/heed review numbers recent decisions; /heed label <n> labels that one", async () => {
+		const { pi } = setup({ config: { mode: "enforce" }, judge: null });
+		await pi.user("Don't modify any files.");
+		await pi.emit("tool_call", toolCall("edit", { path: "a.ts" }));
+		await pi.emit("tool_call", toolCall("edit", { path: "b.ts" }));
+		await pi.command("/heed review");
+		assert.match(pi.notes.at(-1)!, / 1\. BLOCKED\s+edit b\.ts/);
+		assert.match(pi.notes.at(-1)!, / 2\. BLOCKED\s+edit a\.ts/);
+		await pi.command("/heed label 2 bad not a real change");
+		const label = pi.entries.at(-1)!;
+		assert.equal(label.customType, "heed-label");
+		assert.equal(label.data.label, "bad");
+		await pi.command("/heed review");
+		assert.match(pi.notes.at(-1)!, / 2\. BLOCKED\s+edit a\.ts.*\(bad\)/);
+	});
+});

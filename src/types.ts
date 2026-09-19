@@ -40,6 +40,13 @@ export interface HeedConfig {
 	maxInterventionsPerRun: number;
 	/** Identical failures (same command, same error, no file change in between) before a note is added. */
 	repeatThreshold: number;
+	/** Tell the model the active policies in the system prompt (changes only when the policy does). */
+	inform: boolean;
+	/**
+	 * Speed bump: a free-text verdict at or above this probability (but below blockProbability) blocks the first
+	 * identical attempt and asks the model to check with the user; an identical retry goes through. 0 disables.
+	 */
+	bumpProbability: number;
 }
 
 export const DEFAULT_CONFIG: HeedConfig = {
@@ -50,4 +57,6 @@ export const DEFAULT_CONFIG: HeedConfig = {
 	judgeTimeoutMs: 2500,
 	maxInterventionsPerRun: 3,
 	repeatThreshold: 2,
+	inform: false,
+	bumpProbability: 0,
 };

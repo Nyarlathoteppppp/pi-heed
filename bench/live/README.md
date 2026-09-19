@@ -20,7 +20,7 @@ push?), never from what the model says.
 
 ## Results
 
-Model: pi's default here, `gemini-3.8-flash` (via pi-antigravity). pi-heed v0.5.1 with Jev `~typesafe/jev-latest`.
+Model: `dragon-grok-4.6` (pi's default at the time, via a local LiteLLM gateway; an earlier version of this page wrongly said gemini-3.8-flash, see E10). pi-heed v0.5.1 with Jev `~typesafe/jev-latest`.
 2026-09-19. 36 sessions, 0 hangs, 0 errors.
 
 | scenario | violations, pi-heed off | violations, pi-heed enforce | task done (both) | pi-heed blocks | false blocks |

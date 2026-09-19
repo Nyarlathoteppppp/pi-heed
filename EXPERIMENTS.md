@@ -21,6 +21,7 @@ decided and commit the script, so someone else can rerun it.
 | [E09](#e09--typesafes-authoring-guidelines-structured-questions) | Do TypeSafe's authoring guidelines help? | For 3 of 8 judgements (read-only, push, tool relevance); prose stays for the rest. Jev-decided calls 52 → 12 |
 | [E10](#e10--does-it-matter-with-a-real-model) | Does it matter with a real model? | Simple constraints: the model keeps them itself (0/15 either way). Constraint changed mid-session: model broke it 3/3, pi-heed stopped 3/3, 0 false blocks |
 | [E11](#e11--what-real-sessions-show) | What do the author's real sessions show? | Implicit lifts, scratch files, design guidance mistaken for bans, a 别人 parsing bug, heredoc `>` misread. Sets the v0.6 agenda |
+| [E13](#e13--cold-start-and-warm-up-on-typesafes-own-api) | Is there a cold start to pre-warm? | Only the first request per process (~900 ms → ~330 ms with a warm-up HEAD); no re-warming needed after 30 s idle |
 | [E12](#e12--v06-real-session-fixes-and-a-shared-state-trap) | v0.6: fixing E11, and a shared-state trap | Real-session cases 3/6 → 6/6, false block 0.0%; one question needed its own request, because a shared state cost it 3 of 9 lifts |
 
 ---
@@ -258,7 +259,12 @@ and the benchmark should be re-recorded when the version changes.
 stated earlier in a real multi-turn session, and does pi-heed stop it without getting in the way?
 
 **Setup.** Six tiny git repos, each with a temptation, in real pi with the user's normal extensions and default
-model (`gemini-3.8-flash`). pi-heed `off` vs `enforce`, three runs each, 36 sessions. Outcomes come from the file
+model. pi-heed `off` vs `enforce`, three runs each, 36 sessions.
+
+> **Correction.** This entry first named the model as `gemini-3.8-flash`, inferred from the pi default at the start of
+> the project and never checked. The session files show every run used **`dragon-grok-4.6`** via a local LiteLLM
+> gateway: the default had changed in between. The data stands; the model name was wrong. The runner now pins
+> the model with `--model` and records the model each run actually used. Outcomes come from the file
 system and git. [bench/live/](bench/live/README.md) has the scenarios and the runner.
 
 **Result.**
@@ -337,3 +343,28 @@ the 0.9 block threshold): a miss by design, never a false block.
 
 **Reproduce.** `node bench/run.ts --judge replay`; `node bench/run.ts --impl v052 --judge replay` after
 `mkdir -p bench/.v052 && git archive 194e81e src | tar -x -C bench/.v052`.
+
+## E13 · Cold start and warm-up on TypeSafe's own API
+
+**Question.** pi-heed moved from OpenRouter to TypeSafe's own endpoint (`api.typesafe.ai`, same model:
+`jev-1.13.0` vs OpenRouter's `jev-1.13-20260917`; the same request scored 0.68–0.69 vs 0.63–0.70). The first
+request seemed slow. Is there a cold start, and does it come back after idle time?
+
+**Setup.** Fresh process per run, five runs each: no warm-up; the existing warm-up (an unauthenticated HEAD at
+session start); a tiny real decision as warm-up. Then one process making a decision after 1–30 s of idle time.
+
+**Result.**
+
+| | first decision |
+|---|---|
+| no warm-up | 790–918 ms |
+| HEAD warm-up (current) | 305–382 ms |
+| tiny decision warm-up | 288–397 ms |
+
+After 1, 3, 5, 8, 15 and 30 s idle: 290–390 ms, so no second cold start. The cost is the connection (TLS to
+`api.typesafe.ai` from the author's location), not a model warming up server-side. From here TypeSafe's endpoint is
+about 0.1–0.4 s slower than OpenRouter's.
+
+**Decision.** Keep the session-start HEAD warm-up; a real warm-up request adds nothing. No periodic re-warming.
+
+**Reproduce.** `bench/experiments/e13-warmup.ts` (live).

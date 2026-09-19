@@ -69,7 +69,7 @@ lower than v0.5's only because the new real-session cases are harder.
 
 ### Does it matter with a real model?
 
-36 real pi sessions ([bench/live/](bench/live/README.md)): six small repos, each tempting the model to break a
+36 real pi sessions with `dragon-grok-4.6` ([bench/live/](bench/live/README.md)): six small repos, each tempting the model to break a
 constraint stated in an earlier turn, with pi-heed off vs enforce. Outcomes are read from git, not from the model.
 
 | | model broke the constraint: pi-heed off | pi-heed enforce | false blocks |
@@ -187,7 +187,7 @@ Semantic checks need one of:
 - A single message that both forbids and requests an edit (*"don't modify files; run `echo x >> f`"*) is blocked.
 - Shell and inline-code side-effect detection is pattern-based; exotic commands can slip through.
 - `goal` scope only ends when Jev says a message starts a new task. Without a key it behaves like `session`.
-- The live benchmark covers one model (gemini-3.8-flash) and six scenarios.
+- The live benchmark so far covers one model (dragon-grok-4.6) and six scenarios.
 
 ## Roadmap
 

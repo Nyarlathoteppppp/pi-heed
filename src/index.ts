@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { classify, truncate } from "./actions.ts";
 import { exceptionCheck, judgeCheck, policyVerdict, RELEVANCE_TOOLS, toolRelevance } from "./gate.ts";
 import { JevJudge, type Judge, resolveTransport, settle } from "./judge.ts";
-import { describe, type Policy, PolicyEngine, type PolicyOp, type Prerequisite, type Resolution } from "./policy.ts";
+import { describe, plain, type Policy, PolicyEngine, type PolicyOp, type Prerequisite, type Resolution } from "./policy.ts";
 import { RepeatTracker } from "./repeat.ts";
 import { mentionedPaths, parseMessage } from "./rules.ts";
 import { DEFAULT_CONFIG, type HeedConfig, type Mode, type ToolAction, type Verdict } from "./types.ts";
@@ -82,7 +82,12 @@ const LEGACY_KIND: Record<string, { action: "modify" | "install_deps"; resource:
 export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	const env = options.env ?? process.env;
 	const envMode = env.PI_HEED_MODE as Mode | undefined;
-	const config: HeedConfig = { ...DEFAULT_CONFIG, ...(envMode && MODES.includes(envMode) ? { mode: envMode } : {}), ...options.config };
+	const envFlags: Partial<HeedConfig> = {
+		...(envMode && MODES.includes(envMode) ? { mode: envMode } : {}),
+		...(env.PI_HEED_INFORM ? { inform: env.PI_HEED_INFORM === "1" } : {}),
+		...(env.PI_HEED_BUMP ? { bumpProbability: Number(env.PI_HEED_BUMP) || 0 } : {}),
+	};
+	const config: HeedConfig = { ...DEFAULT_CONFIG, ...envFlags, ...options.config };
 	const transport = options.judge === undefined ? resolveTransport(env) : undefined;
 	const judge: Judge | undefined = options.judge === undefined ? (transport ? new JevJudge(transport) : undefined) : (options.judge ?? undefined);
 
@@ -92,6 +97,8 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	const pending = new Map<string, ToolAction>();
 	const speculative = new Map<string, { inputKey: string; decision: Promise<Decision | undefined>; early: boolean; path?: string }>();
 	const memo = new Map<string, Promise<Decision>>();
+	/** Speed-bumped calls (policy ids + tool + input): an identical retry goes through. */
+	const bumped = new Set<string>();
 	/** Per free-text policy: tools Jev is confident cannot break it. Asked once, in one request, per policy. */
 	const relevance = new Map<string, Promise<Record<string, boolean>>>();
 	let understanding: Promise<void> | undefined;
@@ -276,6 +283,26 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		const blockable =
 			verdict?.decision === "violates" &&
 			(verdict.by === "rule" || (verdict.probability >= config.blockProbability && verdict.confidence >= config.blockConfidence));
+		// Speed bump: unsure but likely. Stop the first attempt and ask the model to check with the user in the chat
+		// (no dialog); an identical retry means the model decided it is fine, and goes through.
+		const bump =
+			!blockable && verdict?.decision === "violates" && verdict.by === "jev" && config.bumpProbability > 0 && verdict.probability >= config.bumpProbability;
+		if (bump) {
+			const key = JSON.stringify([policyId ?? "custom", action.summary]);
+			const first = !bumped.has(key);
+			const act = first && canIntervene();
+			log({ ...base, acted: act, note: first ? "speed bump" : "speed bump: identical retry allowed" });
+			if (!act) return;
+			bumped.add(key);
+			interventions++;
+			status(ctx, `bump ${action.toolName}`);
+			return {
+				block: true,
+				reason:
+					`[pi-heed] This call may conflict with what the user asked (p=${verdict!.probability.toFixed(2)}). ${verdict!.evidence} ` +
+					"Check with the user in your reply before doing this. If the user already approved it, repeat the exact same call and it will go through.",
+			};
+		}
 		const act = blockable && canIntervene();
 		log({ ...base, acted: act, budgetExhausted: blockable && config.mode === "enforce" && !act });
 		if (!blockable) return;
@@ -334,6 +361,21 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 			}
 			if (jevLines.length) status(ctx);
 		});
+	});
+
+	// Tell the model the rules up front, so it doesn't have to find them by being blocked. The block is derived from
+	// the policy state only, so the system prompt changes (and the provider cache resets) only when the policy does.
+	pi.on("before_agent_start", (event) => {
+		if (config.mode === "off" || !config.inform) return;
+		const active = engine.active();
+		if (!active.length) return;
+		const lines = active.map((p) => `- ${plain(p)}. The user said: "${truncate(p.sourceQuote, 160)}"`);
+		return {
+			systemPrompt:
+				`${event.systemPrompt}\n\n## Rules the user set in this conversation\n` +
+				"These come from the user's own messages. Tool calls that break them are stopped before they run; if a rule is in the way, ask the user.\n" +
+				lines.join("\n"),
+		};
 	});
 
 	pi.on("agent_start", () => {
@@ -454,14 +496,25 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		return { content: [...event.content, { type: "text" as const, text: evidence.note }] };
 	});
 
+	/** Gate/repeat decisions, newest first, numbered from 1, with any label already given. */
+	function recentDecisions(ctx: ExtensionContext, n: number) {
+		const branch = ctx.sessionManager.getBranch() as Array<Record<string, any>>;
+		const labels = new Map(branch.filter((e) => e.type === "custom" && e.customType === "heed-label").map((e) => [e.data?.target, e.data?.label]));
+		return branch
+			.filter((e) => e.type === "custom" && e.customType === "heed" && e.data?.kind !== "constraint")
+			.reverse()
+			.slice(0, n)
+			.map((e, i) => ({ n: i + 1, e, label: labels.get(e.id) as string | undefined }));
+	}
+
 	const line = (p: Policy) =>
 		`${p.id} ${describe(p)}${p.exceptions.length ? ` except ${p.exceptions.join(",")}` : ""}  ← ${p.provenance.by} #${p.provenance.at}: "${truncate(p.sourceQuote, 80)}"`;
 
 	pi.registerCommand("heed", {
 		description:
-			"pi-heed: status | policies | history | explain <id> | mode <off|shadow|enforce> | add <text> | drop <id> | log [n] | label <good|bad> [note]",
+			"pi-heed: status | policies | history | explain <id> | mode <off|shadow|enforce> | add <text> | drop <id> | log [n] | review [n] | label [n] <good|bad> [note]",
 		getArgumentCompletions: (prefix) => {
-			const subs = ["status", "policies", "history", "explain", "mode", "add", "drop", "log", "label"];
+			const subs = ["status", "policies", "history", "explain", "mode", "add", "drop", "log", "review", "label"];
 			return subs.filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s }));
 		},
 		handler: async (args, ctx) => {
@@ -534,13 +587,28 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 						});
 					return say(records.length ? records.join("\n") : "no pi-heed records on this branch");
 				}
+				case "review": {
+					const decisions = recentDecisions(ctx, Math.max(1, Number(arg) || 10));
+					if (!decisions.length) return say("no pi-heed decisions on this branch yet");
+					return say(
+						[
+							...decisions.map(({ n, e, label }) => {
+								const r = e.data as HeedLogRecord;
+								const what = r.acted ? "BLOCKED" : r.verdict?.decision === "violates" ? "would block" : "allowed";
+								return `${String(n).padStart(2)}. ${what.padEnd(11)} ${truncate(r.summary ?? "", 70)}${r.policy ? `  [${r.policy}]` : ""}${label ? `  (${label})` : ""}`;
+							}),
+							"label with: /heed label <n> good|bad [note]",
+						].join("\n"),
+					);
+				}
 				case "label": {
+					const n = /^\d+$/.test(rest[0] ?? "") ? Number(rest.shift()) : 1;
 					const [verdict, ...note] = rest;
-					if (verdict !== "good" && verdict !== "bad") return say("usage: /heed label <good|bad> [note]  (labels the latest decision)", "warning");
-					const last = (ctx.sessionManager.getBranch() as Array<Record<string, any>>).filter((e) => e.type === "custom" && e.customType === "heed" && e.data?.kind !== "constraint").at(-1);
-					if (!last) return say("nothing to label", "warning");
-					pi.appendEntry("heed-label", { target: last.id, label: verdict, note: note.join(" ") || undefined });
-					return say(`labelled ${last.id} ${verdict}`);
+					if (verdict !== "good" && verdict !== "bad") return say("usage: /heed label [n] <good|bad> [note]   (n from /heed review; default: latest)", "warning");
+					const target = recentDecisions(ctx, 50).find((d) => d.n === n);
+					if (!target) return say(`no decision #${n}; see /heed review`, "warning");
+					pi.appendEntry("heed-label", { target: target.e.id, label: verdict, note: note.join(" ") || undefined });
+					return say(`labelled #${n} ${verdict}`);
 				}
 				default:
 					return say(`unknown subcommand ${sub}`, "warning");

@@ -27,8 +27,11 @@ const impl = arg("impl", "current") as "current" | "baseline";
 const cassettePath = join(here, impl === "current" ? "cassette.json" : `cassette.${impl}.json`);
 const realtime = flag("realtime");
 
-type Cassette = Record<string, { status: number; body: string; ms: number }>;
+type Cassette = Record<string, { status: number; body: string; ms: number }> & { _meta?: { url: string; model: string } };
 const cassette: Cassette = existsSync(cassettePath) ? JSON.parse(readFileSync(cassettePath, "utf8")) : {};
+// Cassettes remember which endpoint they were recorded against (request bodies differ by provider).
+// Cassettes from before this field were recorded via OpenRouter.
+const recorded = (cassette._meta as { url: string; model: string } | undefined) ?? { url: "https://openrouter.ai/api/alpha/decisions", model: "~typesafe/jev-latest" };
 let dirty = false;
 
 interface Meter {
@@ -45,7 +48,7 @@ function cassetteFetch(): typeof fetch {
 		const body = String(init.body ?? "");
 		const key = createHash("sha1").update(`${url}\n${body}`).digest("hex");
 		meter.calls++;
-		let hit = cassette[key];
+		let hit = (cassette as Record<string, { status: number; body: string; ms: number }>)[key];
 		if (!hit || judgeMode === "live" || judgeMode === "record") {
 			if (judgeMode === "replay") {
 				meter.misses++;
@@ -56,7 +59,7 @@ function cassetteFetch(): typeof fetch {
 			const text = await res.text();
 			hit = { status: res.status, body: text, ms: Math.round(performance.now() - t0) };
 			if (judgeMode === "record" && res.ok) {
-				cassette[key] = hit;
+				(cassette as Record<string, unknown>)[key] = hit;
 				dirty = true;
 			}
 		} else if (realtime) {
@@ -71,8 +74,14 @@ function cassetteFetch(): typeof fetch {
 
 function makeJudge(): Judge | null {
 	if (judgeMode === "none") return null;
-	const t = resolveTransport() ?? { url: "https://openrouter.ai/api/alpha/decisions", model: "~typesafe/jev-latest", key: "replay" };
-	if (judgeMode !== "replay" && t.key === "replay") throw new Error("no Jev key: set PI_HEED_ENV_FILE or OPENROUTER_API_KEY");
+	if (judgeMode === "replay") return new JevJudge({ ...recorded, key: "replay" }, cassetteFetch());
+	const t = resolveTransport();
+	if (!t) throw new Error("no Jev key: set PI_HEED_ENV_FILE, TYPESAFE_API_KEY or OPENROUTER_API_KEY");
+	if (judgeMode === "record") {
+		for (const k of Object.keys(cassette)) delete (cassette as Record<string, unknown>)[k];
+		cassette._meta = { url: t.url, model: t.model };
+		dirty = true;
+	}
 	return new JevJudge(t, cassetteFetch());
 }
 
