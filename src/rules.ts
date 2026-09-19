@@ -168,7 +168,7 @@ function detectTargets(clause: string, allow = false): Target[] {
 	// 依赖 is also the verb "depend on" (所有依赖旧状态的结果): Chinese needs an install/add context
 	if (
 		// English needs an add/install/new context too: "dependency graph" is not about installing anything
-		/\b(?:add|adding|install|installing|introduce|pull in|new|extra|additional|any)\b[^.。]{0,24}\b(?:dependenc\w*|deps|packages?(?![.\w])|librar(?:y|ies))\b|\bno\s+(?:new\s+|more\s+)?(?:dependenc\w*|deps|packages|libraries)\b/i.test(clause) ||
+		/\b(?:add|adding|install|installing|introduce|pull in|new|extra|additional|any)\b[^.。]{0,24}\b(?:dependenc\w*|deps|packages?(?!\.?\w)|librar(?:y|ies))\b|\bno\s+(?:new\s+|more\s+)?(?:dependenc\w*|deps|packages|libraries)\b/i.test(clause) ||
 		/(?:装|安装|引入|加|添加|新增|增加)\s*(?:新的?|任何|额外的?|第三方)?\s*(?:依赖|包|库)|新依赖|第三方(?:依赖|库|包)|依赖包|装包/.test(clause)
 	) {
 		t.push({ action: "install_deps", resource: "*" });

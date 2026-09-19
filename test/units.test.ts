@@ -274,3 +274,10 @@ describe("indirect writes: package scripts and script files", () => {
 	});
 });
 
+
+describe("parser: a sentence ending in 'package.' (live S11)", () => {
+	it("is about installing, not every file", () => {
+		const ops = parseMessage("Ask me before you install any package.", 0);
+		assert.deepEqual(ops.map((o: any) => [o.spec.effect, o.spec.action]), [["REQUIRE_CONFIRMATION", "install_deps"]]);
+	});
+});

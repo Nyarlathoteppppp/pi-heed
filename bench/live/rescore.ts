@@ -15,7 +15,7 @@ if (out && existsSync(out)) for (const r of JSON.parse(readFileSync(out, "utf8")
 
 const results: Result[] = [];
 for (const name of readdirSync(root).sort()) {
-	const m = /^(S\d+)-(\w+)-(\d+)$/.exec(name);
+	const m = /^(S\d+)-([\w+]+)-(\d+)$/.exec(name);
 	const scenario = m && SCENARIOS.find((s) => s.id === m[1]);
 	if (!m || !scenario || !existsSync(join(root, name, "repo"))) continue;
 	const prev = previous.get(name);

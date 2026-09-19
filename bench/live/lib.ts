@@ -33,12 +33,15 @@ export interface Result {
 	registrationMissing?: boolean;
 }
 
-/** Content hash of every file in the repo (no .git, no node_modules), by path. */
+/** Directories other pi extensions write into the working directory (pi-lens: .pi-lens-probe-home/). Not the model's work. */
+const EXTENSION_DIR = /^\.pi-/;
+
+/** Content hash of every file in the repo (no .git, no node_modules, no extension dirs), by path. */
 export function snapshot(repo: string): Record<string, string> {
 	const out: Record<string, string> = {};
 	const walk = (dir: string, rel: string) => {
 		for (const name of readdirSync(dir)) {
-			if (name === ".git" || name === "node_modules") continue;
+			if (name === ".git" || name === "node_modules" || (!rel && EXTENSION_DIR.test(name))) continue;
 			const abs = join(dir, name);
 			const r = rel ? `${rel}/${name}` : name;
 			if (statSync(abs).isDirectory()) walk(abs, r);
@@ -125,7 +128,7 @@ export function helpersFor(repo: string, facts: SessionFacts, dir?: string): Hel
 		changed: async () => {
 			const diff = await sh("git diff --name-only $(git rev-list --max-parents=0 HEAD)", repo);
 			const untracked = await sh("git ls-files --others --exclude-standard", repo);
-			return [...new Set([...diff.out.split("\n"), ...untracked.out.split("\n")].map((s) => s.trim()).filter(Boolean))];
+			return [...new Set([...diff.out.split("\n"), ...untracked.out.split("\n")].map((s) => s.trim()).filter((p) => p && !EXTENSION_DIR.test(p)))];
 		},
 		read: (p) => (existsSync(join(repo, p)) ? readFileSync(join(repo, p), "utf8") : undefined),
 		exists: (p) => existsSync(join(repo, p)),

@@ -92,6 +92,9 @@ const liftParams = () =>
 export function registerLedgerTools(pi: ExtensionAPI, host: LedgerHost) {
 	pi.registerTool({
 		name: "heed_record",
+		// pi prepares (and gate-checks) every call in a batch before running any: "record an allow + edit" in one
+		// message had the edit checked before the allow existed (live S8). Sequential: check one, run it, then the next.
+		executionMode: "sequential",
 		label: "Record a user rule",
 		description:
 			"Record a rule the user stated about what you may or may not do, so pi-heed enforces it on your tool calls for the rest of the session, " +
@@ -147,6 +150,7 @@ export function registerLedgerTools(pi: ExtensionAPI, host: LedgerHost) {
 
 	pi.registerTool({
 		name: "heed_lift",
+		executionMode: "sequential",
 		label: "Lift a user rule",
 		description:
 			"End a rule recorded earlier, because the user lifted it in a later message. Give the rule id and the user's exact words. " +
