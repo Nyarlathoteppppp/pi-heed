@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import type { ToolAction } from "./types.ts";
 
 // Deterministic side-effect classification. Jev scored "edit changes files" at ~0.7 in a
@@ -66,7 +68,74 @@ function str(v: unknown): string | undefined {
 	return typeof v === "string" ? v : undefined;
 }
 
-export function classify(toolName: string, input: Record<string, unknown>): ToolAction {
+// Tools that rewrite the files they are given. [command, what makes it write (or null: writes by default), what makes it not]
+const WRITERS: Array<[RegExp, RegExp | null, RegExp | null]> = [
+	[/\bprettier\b/, /\s(?:--write|-w)\b/, null],
+	[/\b(?:eslint|stylelint|biome\s+(?:check|lint|format)|oxlint)\b/, /\s(?:--fix|--write|--apply)\b/, null],
+	[/\bruff\s+check\b/, /\s--fix\b/, null],
+	[/\bruff\s+format\b/, null, /\s(?:--check|--diff)\b/],
+	[/\b(?:black|isort|autopep8|yapf)\b/, null, /\s(?:--check|--diff|-c)\b/],
+	[/\b(?:gofmt|goimports)\b/, /\s-w\b/, null],
+	[/\bgo\s+(?:fmt|generate)\b/, null, null],
+	[/\bcargo\s+(?:fmt|fix|clippy\s+.*--fix)\b/, null, /\s--check\b/],
+	[/\b(?:rustfmt)\b/, null, /\s--check\b/],
+	[/\bclang-format\b/, /\s-i\b/, null],
+	[/\bswiftformat\b|\bswiftlint\s+--fix\b|\bswiftlint\s+autocorrect\b/, null, /\s--lint\b/],
+	[/\btsc\b/, null, /\s--noEmit\b|\s-p\s+\S*noemit/i],
+];
+/** Script names that build, format or generate: they write even when their body can't be read. */
+const WRITING_SCRIPT = /^(?:build|compile|dist|bundle|format|fmt|fix|lint:fix|prettier|gen|generate|codegen|migrate|seed|clean|release|prepare|postinstall)(?:[:-].*)?$/;
+const RUN_SCRIPT = /\b(?:npm|pnpm|yarn|bun)\s+(?:run(?:-script)?\s+)?([\w:.-]+)/;
+const MAKE = /\bmake(?:\s+-\S+)*(?:\s+([\w.-]+))?/;
+const READ_ONLY_TARGET = /^(?:test|tests|check|lint|help|list|print-.*|-n)$/;
+const SCRIPT_FILE = /\b(?:node|python3?|ruby|perl|bun|deno\s+run|tsx|ts-node)(?:\s+-\S+)*\s+([\w./@-]+\.(?:m?[jt]s|cjs|py|rb|pl))\b/;
+
+/** Writes that only show up once you know what a tool, a package script or a script file does. */
+function indirectWrites(shell: string, cwd: string | undefined, depth = 0): boolean {
+	for (const [cmd, on, off] of WRITERS) {
+		if (!cmd.test(shell)) continue;
+		if ((on ? on.test(shell) : true) && !(off && off.test(shell))) return true;
+	}
+	const run = shell.match(RUN_SCRIPT);
+	if (run && !/^(?:install|i|add|ci|test|t|ls|list|view|info|outdated|audit|why|exec|x|dlx|create|init|publish)$/.test(run[1])) {
+		const body = packageScript(run[1], cwd);
+		if (body !== undefined && depth < 2) {
+			const { shell: inner, code } = splitInterpreterCode(body);
+			if (MUTATING_BASH.some((re) => re.test(withoutLiterals(inner))) || code.some((c) => CODE_WRITES.some((re) => re.test(c))) || indirectWrites(inner, cwd, depth + 1)) return true;
+		} else if (WRITING_SCRIPT.test(run[1])) return true;
+	}
+	const make = shell.match(MAKE);
+	if (make && !READ_ONLY_TARGET.test(make[1] ?? "")) return true;
+	const file = shell.match(SCRIPT_FILE)?.[1];
+	if (file && cwd) {
+		const src = readSmall(isAbsolute(file) ? file : join(cwd, file));
+		if (src !== undefined && CODE_WRITES.some((re) => re.test(src))) return true;
+	}
+	return false;
+}
+
+function packageScript(name: string, cwd: string | undefined): string | undefined {
+	if (!cwd) return undefined;
+	const raw = readSmall(join(cwd, "package.json"));
+	if (raw === undefined) return undefined;
+	try {
+		const body = JSON.parse(raw)?.scripts?.[name];
+		return typeof body === "string" ? body : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function readSmall(path: string): string | undefined {
+	try {
+		if (!existsSync(path) || statSync(path).size > 256_000) return undefined;
+		return readFileSync(path, "utf8");
+	} catch {
+		return undefined;
+	}
+}
+
+export function classify(toolName: string, input: Record<string, unknown>, cwd?: string): ToolAction {
 	if (READ_TOOLS.has(toolName)) {
 		const path = str(input.path) ?? str(input.pattern) ?? "";
 		return { toolName, effect: "read", mutates: false, installsDeps: false, gitPush: false, gitCommit: false, runsTests: false, paths: path ? [path] : [], summary: `${toolName} ${path}`.trim() };
@@ -78,10 +147,13 @@ export function classify(toolName: string, input: Record<string, unknown>): Tool
 	if (toolName === "bash") {
 		const command = str(input.command) ?? "";
 		const { shell, code } = splitInterpreterCode(command);
-		const mutates = MUTATING_BASH.some((re) => re.test(withoutLiterals(shell))) || code.some((c) => CODE_WRITES.some((re) => re.test(c)));
+		const direct = MUTATING_BASH.some((re) => re.test(withoutLiterals(shell))) || code.some((c) => CODE_WRITES.some((re) => re.test(c)));
+		const indirect = !direct && indirectWrites(withoutLiterals(shell), cwd);
+		const mutates = direct || indirect;
 		const ops = withoutLiterals(command);
 		const installsDeps = DEP_INSTALL.some((re) => re.test(ops));
-		const writes = mutates && !installsDeps ? writtenPaths(shell) : undefined;
+		// an indirect write goes wherever the tool decides: judge it on every path it mentions
+		const writes = direct && !installsDeps ? writtenPaths(shell) : undefined;
 		return {
 			toolName,
 			effect: "exec",

@@ -1,6 +1,7 @@
 import { truncate } from "./actions.ts";
 import { ask, type ChoiceAnswer, type Judge, type NoulAnswer, type Question } from "./judge.ts";
-import { describe, type Policy, type PolicyOp } from "./policy.ts";
+import { describe, type Policy, type PolicyOp, type PolicySpec } from "./policy.ts";
+import { framing } from "./rules.ts";
 
 // Jev's job here is narrow: classify how one new user message changes the policies that already
 // exist, plus a few yes/no signals. It never writes a policy. The plugin turns confident answers
@@ -117,6 +118,53 @@ export const DIRECTIVE = {
 	},
 } as const;
 
+// A long message with pasted material: is it a task for this assistant (its bans bind) or material to read (a prompt
+// for another AI, another agent's report, a log)? Real pastes from the author's sessions: 23/25, and no material was
+// taken as a task (E17). Examples are deliberately not from that set.
+export const PASTE_KIND = {
+	type: "choice",
+	instructions: {
+		question: "Is `new_user_message` a task the user gives this assistant to carry out, with its constraints?",
+		focus: "Whom the long material is for. A prompt written for another AI or reviewer, another agent's report, a log, or a document to look at is material, even when it says 'you' or 'do not'.",
+	},
+	criteria: {
+		task_for_assistant: {
+			what: "Instructions for this assistant to follow now: a task, a spec, requirements, constraints",
+			examples: ["Refactor the billing module. Constraints: keep the public API, don't touch migrations. Report what changed.", "修一下登录页的样式。要求：只改 css，不要动接口。做完告诉我改了哪些文件。"],
+		},
+		material: {
+			what: "Something for the assistant to read, review or discuss: a report, a prompt meant for another AI, a log, someone else's document or conversation",
+			examples: ["Here is the prompt I use for my reviewer bot: You are a strict reviewer. Do not edit code. …", "同事的周报：本周完成了支付重构，没有改数据库……"],
+		},
+		unclear: "Cannot tell",
+	},
+} as const;
+
+/**
+ * Inside pasted material, a line can still be the user's own ("我的要求：这次别动 package.json"). Real pastes: every line of
+ * 13 pasted reports, prompts and logs was told apart except two report lines at 0.91; the user's own lines scored
+ * ≥ 0.95 (E17). Examples are not from that set.
+ */
+export function ownLineQuestion(line: string): Question {
+	return {
+		type: "choice",
+		instructions: {
+			question: `Who is this line in \`new_user_message\` from: "${truncate(line, 200)}"?`,
+			focus: "The user often pastes material (another AI's report or plan, a prompt written for another AI, a log, a document) and adds their own words around or inside it. Only the user's own words are instructions to this assistant.",
+		},
+		criteria: {
+			user_own: { what: "The user's own instruction to this assistant, added around or inside the pasted material", examples: ["我的要求：这次别动 migrations。", "Note from me: don't deploy anything today."] },
+			pasted: { what: "Part of the pasted material: written by someone else, or for someone else", examples: ["You are a strict reviewer. Do not edit code.", "我只核对了代码，没有改文件。"] },
+			unclear: "Cannot tell",
+		},
+	} as unknown as Question;
+}
+
+/** Long messages: the start and the end, where the user frames what they pasted. */
+function headAndTail(text: string): string {
+	return text.length <= 3000 ? text : `${text.slice(0, 2000)}\n…\n${text.slice(-900)}`;
+}
+
 export function directiveQuestion(rule: string): Question {
 	return { ...DIRECTIVE, instructions: { ...DIRECTIVE.instructions, question: `Does \`new_user_message\` restrict the assistant itself: ${rule}?` } } as unknown as Question;
 }
@@ -128,12 +176,21 @@ export const THRESHOLDS = {
 	add: 0.8,
 	/** P(go_ahead) and confidence to lift read-only. */
 	goAhead: { p: 0.9, confidence: 0.8 },
+	/**
+	 * Same, for a hold the user meant as temporary ("先别改", "not yet"). Replay of the author's sessions: 改吧 0.77/0.69,
+	 * 确认并开始 0.81/0.75, 整理成md 0.89/0.84 are go-aheads; 你打算怎么改 0.57/0.43 and 好改吗 0.03 are not (E17).
+	 */
+	goAheadHold: { p: 0.75, confidence: 0.65 },
 	temporary: 0.8,
 	newTask: 0.8,
 	/** A rule-made custom prohibition below this is not a real prohibition. */
 	reject: 0.2,
 	/** P(design_guidance) and confidence to stop treating a sentence as an enforceable ban. */
 	guidance: { p: 0.9, confidence: 0.8 },
+	/** P(task_for_assistant) and confidence for the bans inside pasted material to count (E17). */
+	pastedTask: { p: 0.9, confidence: 0.8 },
+	/** P(user_own) and confidence for one line inside pasted material. Report lines reached 0.91/0.87 (E17). */
+	ownLine: { p: 0.93, confidence: 0.85 },
 	/** P(not_a_rule) and confidence to drop a parsed restriction. E16: not-rules ≥ 0.96, real rules ≤ 0.19. */
 	notARule: { p: 0.9, confidence: 0.8 },
 };
@@ -159,6 +216,8 @@ export interface UnderstandInput {
 	hasGoalScoped: boolean;
 	/** Explicit paths in the message (rules-extracted): the resource for a confident EXCEPTION/NARROW delta. */
 	mentionedPaths: string[];
+	/** Bans the rules found inside pasted material: added only if Jev confirms they restrict the assistant. */
+	candidates?: PolicySpec[];
 }
 
 export async function understand(judge: Judge | undefined, input: UnderstandInput, timeoutMs: number): Promise<Understanding> {
@@ -177,12 +236,15 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 	const activeKeys = new Set(input.before.map((p) => `${p.effect}|${p.action}|${p.resource}`));
 	// Only for messages the rules found no restriction in: otherwise Jev's extra answers were cross-talk.
 	const rulesRestricted = input.createdByRules.some((p) => p.effect !== "ALLOW" && p.action !== "custom");
-	if (!rulesRestricted) {
+	// Nor for a long pasted message: its bans are usually for someone else (a prompt for another AI, a spec) (E17).
+	const pasted = framing(input.message) !== input.message;
+	if (!rulesRestricted && !pasted) {
 		for (const [name, d] of Object.entries(BUILTIN_DENIES)) {
 			if (!activeKeys.has(`DENY|${d.action}|${d.resource}`)) questions[`set_${name}`] = d.question;
 		}
 	}
-	const readOnly = existing.filter((p) => p.effect === "DENY" && p.action === "modify" && p.resource === "*");
+	// holds ("先别改", read-only) end at a go-ahead; older sessions have read-only without the marker
+	const readOnly = existing.filter((p) => p.effect === "DENY" && (p.until === "go_ahead" || (p.action === "modify" && p.resource === "*")));
 	questions.new_prohibition = { type: "noul", instructions: "new_user_message forbids the assistant from doing something." };
 	questions.new_permission = { type: "noul", instructions: "new_user_message gives the assistant permission to do something it was not allowed to do." };
 	if (input.createdByRules.some((p) => p.effect === "ALLOW" && p.scope === "session")) {
@@ -202,24 +264,32 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 	}
 
 	const state = {
-		new_user_message: truncate(input.message, 3000),
+		new_user_message: headAndTail(input.message),
 		policies_before_message: existing.map((p) => ({ id: p.id, said: truncate(p.sourceQuote, 200), rule: describe(p) })),
 	};
 	// The go-ahead question gets its own request with a minimal state: sharing the full state (the policy list)
 	// cut it from 8/9 to 5/9 lifts caught, with no false lifts either way (E12). The two run in parallel.
-	// Restrictions the parser just added: does the message restrict the assistant at all? Own request, message only (E16).
+	// Restrictions the parser just added: does the message restrict the assistant at all (E16)? Packed into the main
+	// request (TypeSafe: one request for all questions): same answers as a request of its own, 0/18 changed.
 	const parsed = input.createdByRules.filter((p) => p.effect !== "ALLOW");
-	const directiveQs = Object.fromEntries(parsed.map((p) => [`dir_${p.id}`, directiveQuestion(describe(p))]));
-	const [main, goRequest, dirRequest] = await Promise.all([
+	const candidates = input.candidates ?? [];
+	const directiveQs: Record<string, Question> = Object.fromEntries([
+		...parsed.map((p) => [`dir_${p.id}`, directiveQuestion(describe(p))]),
+		...candidates.map((c, i) => [`cand_${i}`, directiveQuestion(`${describe({ ...c, id: "", exceptions: [], status: "active", provenance: { at: c.at, seq: 0, by: c.by } })}, from "${truncate(c.sourceQuote, 160)}"`)]),
+	]);
+	if (candidates.length) directiveQs.paste_kind = PASTE_KIND as unknown as Question;
+	const lines = [...new Set(candidates.map((c) => c.sourceQuote))];
+	lines.forEach((line, i) => (directiveQs[`own_${i}`] = ownLineQuestion(line)));
+	Object.assign(questions, directiveQs);
+	const [main, goRequest] = await Promise.all([
 		ask(judge, state, questions, timeoutMs),
 		readOnly.length
 			? ask(judge, { new_user_message: truncate(input.message, 3000), earlier_policy: truncate(readOnly.at(-1)!.sourceQuote, 300) }, { go_ahead: GO_AHEAD }, timeoutMs)
 			: Promise.resolve(undefined),
-		parsed.length ? ask(judge, { new_user_message: truncate(input.message, 3000) }, directiveQs, timeoutMs) : Promise.resolve(undefined),
 	]);
 	const { error, ms } = main;
 	if (!main.answers) return { ...empty, ms, error };
-	const answers = { ...main.answers, ...(goRequest?.answers ?? {}), ...(dirRequest?.answers ?? {}) };
+	const answers = { ...main.answers, ...(goRequest?.answers ?? {}) };
 
 	const out: Understanding = { ...empty, ms };
 	const choiceP = (k: string, option: string) => {
@@ -271,8 +341,12 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 	// ("you can edit notes.txt only" is not a go-ahead for everything).
 	const go = choiceP("go_ahead", "go_ahead");
 	if (go) out.signals.go_ahead = go.p;
-	if (go && go.p >= THRESHOLDS.goAhead.p && go.confidence >= THRESHOLDS.goAhead.confidence && !input.createdByRules.some((c) => c.effect === "ALLOW")) {
-		for (const p of readOnly) {
+	// A permission the rules found in the same message ("you can edit notes.txt only", "this once") is narrower than a go-ahead.
+	const scopedAllow = input.createdByRules.some((c) => c.effect === "ALLOW");
+	if (go && !scopedAllow) {
+		const passes = (t: { p: number; confidence: number }) => go.p >= t.p && go.confidence >= t.confidence;
+		const held = readOnly.filter((p) => (p.until === "go_ahead" ? passes(THRESHOLDS.goAheadHold) : passes(THRESHOLDS.goAhead)));
+		for (const p of held) {
 			if (out.ops.some((o) => o.op === "supersede" && o.id === p.id)) continue;
 			out.ops.push({ op: "supersede", id: p.id, reason: `go-ahead (jev p=${go.p.toFixed(2)}): "${truncate(input.message, 120)}"`, by: "jev" });
 			if (out.deltas[p.id]) out.deltas[p.id].applied = true;
@@ -283,7 +357,7 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 		if ((noul(`set_${name}`) ?? 0) >= THRESHOLDS.add && !input.createdByRules.some((p) => p.effect === "DENY" && p.action === d.action && p.resource === d.resource)) {
 			out.ops.push({
 				op: "add",
-				spec: { effect: "DENY", action: d.action, resource: d.resource, scope: "session", sourceQuote: truncate(input.message, 300), by: "jev", at: input.at },
+				spec: { effect: "DENY", action: d.action, resource: d.resource, scope: "session", sourceQuote: truncate(input.message, 300), by: "jev", at: input.at, ...(d.resource === "*" && d.action === "modify" ? { until: "go_ahead" as const } : {}) },
 			});
 		}
 	}
@@ -291,6 +365,19 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 		for (const p of input.createdByRules) if (p.effect === "ALLOW" && p.scope === "session") out.ops.push({ op: "rescope", id: p.id, scope: "once", by: "jev" });
 	}
 	if ((noul("new_task") ?? 0) >= THRESHOLDS.newTask) out.ops.unshift({ op: "end", scope: "goal", before: input.at });
+	// Pasted material: its bans count only when Jev is sure the whole paste is a task for this assistant, and each
+	// ban then passes the same not-a-rule check as any other.
+	// …or when that line is the user's own words inside the paste.
+	const task = choiceP("paste_kind", "task_for_assistant");
+	if (task) out.signals.paste_task = task.p;
+	const isTask = !!task && task.p >= THRESHOLDS.pastedTask.p && task.confidence >= THRESHOLDS.pastedTask.confidence;
+	candidates.forEach((c, i) => {
+		const own = choiceP(`own_${lines.indexOf(c.sourceQuote)}`, "user_own");
+		const isOwn = !!own && own.p >= THRESHOLDS.ownLine.p && own.confidence >= THRESHOLDS.ownLine.confidence;
+		const d = choiceP(`cand_${i}`, "not_a_rule");
+		const notRule = !!d && d.p >= THRESHOLDS.notARule.p && d.confidence >= THRESHOLDS.notARule.confidence;
+		if ((isTask || isOwn) && !notRule) out.ops.push({ op: "add", spec: { ...c, by: "jev", at: input.at } });
+	});
 	const notRules = new Set<string>();
 	for (const p of parsed) {
 		const d = choiceP(`dir_${p.id}`, "not_a_rule");

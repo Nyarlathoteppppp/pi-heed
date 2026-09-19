@@ -5,3 +5,4 @@ node_modules/
 bench/.baseline/
 bench/results.*.json
 bench/.v052/
+bench/replay/out/

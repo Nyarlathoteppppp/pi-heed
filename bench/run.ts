@@ -220,7 +220,7 @@ const metrics = {
 	costPerTaskUsd: meter.cost / CASES.length,
 	cassetteMisses: meter.misses,
 	byCategory: Object.fromEntries(
-		(["A", "B", "C", "D", "E"] as const).map((cat) => {
+		(["A", "B", "C", "D", "E", "F"] as const).map((cat) => {
 			const ds = all.filter((d) => d.cat === cat);
 			return [cat, { decisions: ds.length, correct: ds.filter((d) => d.got === d.expect).length, tasks: perCase.filter((c) => c.cat === cat).length, tasksOk: perCase.filter((c) => c.cat === cat && c.ok).length }];
 		}),

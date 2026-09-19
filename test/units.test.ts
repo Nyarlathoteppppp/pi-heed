@@ -51,12 +51,12 @@ describe("constraint extraction", () => {
 describe("side-effect classification", () => {
 	const bash = (command: string) => classify("bash", { command });
 	it("read-only shell commands", () => {
-		for (const c of ["ls -la", "cat a.ts | grep x", "npm test", "git status", "git diff HEAD~1", "npm test 2>&1 | tail", "make build > /dev/null"]) {
+		for (const c of ["ls -la", "cat a.ts | grep x", "npm test", "git status", "git diff HEAD~1", "npm test 2>&1 | tail", "make test", "npx prettier --check .", "ruff format --check src", "tsc --noEmit", "cargo fmt --check", "npm run lint"]) {
 			assert.equal(bash(c).mutates, false, c);
 		}
 	});
 	it("mutating shell commands", () => {
-		for (const c of ["echo hi > out.txt", "sed -i '' s/a/b/ f.ts", "rm -rf dist", "git commit -m x", "npm install", "mv a b"]) {
+		for (const c of ["echo hi > out.txt", "sed -i '' s/a/b/ f.ts", "rm -rf dist", "git commit -m x", "npm install", "mv a b", "make build > /dev/null", "make", "npx prettier --write .", "eslint --fix src", "black .", "ruff check --fix", "gofmt -w main.go", "cargo fmt", "tsc", "npm run build", "go generate ./..."]) {
 			assert.equal(bash(c).mutates, true, c);
 		}
 	});
@@ -252,3 +252,25 @@ describe("settings file for pi started outside a shell", () => {
 		assert.deepEqual(readSettingsFile(join(d, "missing.json")), {});
 	});
 });
+
+describe("indirect writes: package scripts and script files", () => {
+	it("reads package.json scripts and script files in the working directory", async () => {
+		const { mkdtempSync, writeFileSync } = await import("node:fs");
+		const { tmpdir } = await import("node:os");
+		const dir = mkdtempSync(`${tmpdir()}/heed-`);
+		writeFileSync(`${dir}/package.json`, JSON.stringify({ scripts: { check: "tsc --noEmit", fmt2: "prettier --write src", gen: "node scripts/gen.js", show: "node scripts/show.js" } }));
+		const { mkdirSync } = await import("node:fs");
+		mkdirSync(`${dir}/scripts`);
+		writeFileSync(`${dir}/scripts/gen.js`, "require('fs').writeFileSync('src/gen.ts', 'x')");
+		writeFileSync(`${dir}/scripts/show.js`, "console.log(require('fs').readFileSync('a'))");
+		const m = (c: string) => classify("bash", { command: c }, dir).mutates;
+		assert.equal(m("npm run check"), false);
+		assert.equal(m("npm run fmt2"), true);
+		assert.equal(m("npm run gen"), true, "script → node file that writes");
+		assert.equal(m("npm run show"), false);
+		assert.equal(m("node scripts/gen.js"), true);
+		assert.equal(m("node scripts/show.js"), false);
+		assert.equal(m("npm run build"), true, "no such script: judged by its name");
+	});
+});
+

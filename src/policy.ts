@@ -34,6 +34,8 @@ export interface Policy {
 	exceptions: string[];
 	status: Status;
 	prerequisite?: Prerequisite;
+	/** "go_ahead": a hold ("先别改", "don't change anything yet", read-only): ends when the user says to proceed. */
+	until?: "go_ahead";
 	provenance: Provenance;
 }
 
@@ -44,12 +46,15 @@ export interface PolicySpec {
 	scope: Scope;
 	sourceQuote: string;
 	prerequisite?: Prerequisite;
+	until?: "go_ahead";
 	by: Provenance["by"];
 	at: number;
 }
 
 export type PolicyOp =
 	| { op: "add"; spec: PolicySpec }
+	/** The user said to proceed ("改吧", "go ahead"): ends every hold stated in an earlier message. */
+	| { op: "go_ahead"; quote: string; at: number; by: Provenance["by"] }
 	/** Supersede the most recent active ALLOW ("never mind, revoke that permission"). */
 	| { op: "revoke_allow"; quote: string; at: number; by: Provenance["by"] }
 	/** Targeted end of one policy (Jev LIFT, /heed drop, rejected fake prohibition). */
@@ -136,6 +141,10 @@ export class PolicyEngine {
 					.sort((a, b) => b.provenance.seq - a.provenance.seq)[0];
 				return last ? [this.end(last, "superseded", `revoked: "${op.quote}"`)] : [];
 			}
+			case "go_ahead":
+				return this.active()
+					.filter((p) => p.until === "go_ahead" && p.provenance.at < op.at)
+					.map((p) => this.end(p, "superseded", `go-ahead (${op.by}): "${op.quote.slice(0, 120)}"`));
 			case "supersede": {
 				const p = this.get(op.id);
 				return p?.status === "active" ? [this.end(p, "superseded", op.reason)] : [];
@@ -188,6 +197,7 @@ export class PolicyEngine {
 			exceptions: [],
 			status: "active",
 			...(spec.prerequisite ? { prerequisite: spec.prerequisite } : {}),
+			...(spec.until ? { until: spec.until } : {}),
 			provenance: { at: spec.at, seq: this.seq, by: spec.by },
 		};
 		// A restriction on exactly this (re-apply), or a newer restriction of another kind, replaces

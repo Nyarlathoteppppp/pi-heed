@@ -1,6 +1,6 @@
 {
 	"name": "pi-heed",
-	"version": "0.7.4",
+	"version": "0.8.0",
 	"description": "Runtime constraints for the pi coding agent: checks every side-effecting tool call against what you said, before it runs. Powered by TypeSafe Jev.",
 	"type": "module",
 	"license": "MIT",

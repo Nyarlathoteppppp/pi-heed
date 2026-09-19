@@ -7,7 +7,7 @@ import { exceptionCheck, judgeCheck, policyVerdict, RELEVANCE_TOOLS, toolRelevan
 import { JevJudge, type Judge, resolveTransport, settle } from "./judge.ts";
 import { describe, plain, type Policy, PolicyEngine, type PolicyOp, type Prerequisite, type Resolution } from "./policy.ts";
 import { RepeatTracker } from "./repeat.ts";
-import { mentionedPaths, parseMessage } from "./rules.ts";
+import { mentionedPaths, parseMessage, pastedBody } from "./rules.ts";
 import { DEFAULT_CONFIG, type HeedConfig, type Mode, type ToolAction, type Verdict } from "./types.ts";
 import { understand } from "./understand.ts";
 
@@ -395,6 +395,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 			createdByRules: engine.all().slice(seqBefore).filter((p) => p.status === "active"),
 			hasGoalScoped: before.some((p) => p.scope === "goal"),
 			mentionedPaths: mentionedPaths(text),
+			candidates: parseMessage(pastedBody(text), at, true).flatMap((op) => (op.op === "add" && op.spec.effect !== "ALLOW" ? [op.spec] : [])),
 		};
 		// Ask which tools a new free-text prohibition can concern now, not on the first tool call.
 		for (const p of input.createdByRules) if (p.action === "custom") void relevanceOf(p);
@@ -464,7 +465,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		}
 		if (e.type !== "toolcall_end") return;
 		const { id, name, arguments: args } = e.toolCall;
-		const action = classify(name, args);
+		const action = classify(name, args, cwd);
 		if (!action.mutates && action.effect !== "unknown") return;
 		const prior = speculative.get(id);
 		const reuse = prior?.early && prior.path === args.path;
@@ -479,7 +480,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		if (config.mode === "off") return;
 		cwd = ctx.cwd ?? cwd;
 		const input = event.input as Record<string, unknown>;
-		const action = classify(event.toolName, input);
+		const action = classify(event.toolName, input, cwd);
 		pending.set(event.toolCallId, action);
 		if (!action.mutates && action.effect !== "unknown") return;
 

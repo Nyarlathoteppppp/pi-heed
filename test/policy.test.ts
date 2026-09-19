@@ -519,7 +519,7 @@ describe("E16: parsed restrictions that do not restrict the assistant", () => {
 
 	it("an explanation request is not a push ban; the real rule in the next message is kept", async () => {
 		const { pi, heed } = enforce(deltaJudge((k) => (k.startsWith("dir_") ? (heed.engine.all().length === 1 ? notRule : binds) : undefined)));
-		await pi.user("为什么大家说不要 force push？解释一下。");
+		await pi.user("Explain what git push --force does and why you should never push it to main.");
 		await heed.settled();
 		assert.equal(heed.engine.active().length, 0);
 		assert.match(heed.engine.history()[0].provenance.endReason!, /not a restriction/);
@@ -561,5 +561,78 @@ describe("bash: what a command writes", () => {
 		for (const command of ["echo 'git push' | sh", "bash -c 'git push'", "ssh host 'cd app && git push'", "git commit -am x && git push"]) {
 			assert.equal(await blocked(pi, "bash", { command }), true, command);
 		}
+	});
+});
+
+describe("E17: holds end at the go-ahead (replay of the author's sessions)", () => {
+	const active = (h: any) => h.engine.active().map((p: any) => `${p.effect} ${p.action} ${p.resource}`);
+
+	it("先别改回答我 → 改吧 lifts; 好改吗 / 你打算怎么改 do not", async () => {
+		for (const [reply, lifted] of [["改吧", true], ["好改吗", false], ["你打算怎么改，更加优化一下用户体验", false], ["确认并开始", true], ["好的，按你的方案做吧", true]] as const) {
+			const { pi, heed } = enforce();
+			await pi.user("ok，还有一个问题，piweb在我确认goal的时候显示不全，你看看什么情况，先别改回答我");
+			assert.deepEqual(active(heed), ["DENY modify *"], "a hold on changes is read-only, not a free-text ban");
+			await next(pi, reply);
+			assert.equal(await edit(pi, "src/a.ts"), !lifted, reply);
+		}
+	});
+
+	it("a go-ahead ends holds but not lasting bans, and a ban in the same message stays", async () => {
+		const { pi, heed } = enforce();
+		await pi.user("别动 package.json。在我没有说改的时候不要改，现在主要是检查问题。");
+		await next(pi, "没问题做吧，记得子代理测试不要让他们乱改。开始做吧");
+		assert.equal(await edit(pi, "src/a.ts"), false);
+		assert.equal(await edit(pi, "package.json"), true);
+		await next(pi, "改吧，但别动 README.md");
+		assert.equal(await edit(pi, "README.md"), true);
+	});
+
+	it("read-only review ends at the go-ahead; its push ban does not", async () => {
+		const { pi } = enforce();
+		await pi.user("只读审查，不要修改文件、不要推送。");
+		await next(pi, "可以动手了");
+		assert.equal(await edit(pi, "src/a.ts"), false);
+		assert.equal(await blocked(pi, "bash", { command: "git push" }), true);
+	});
+
+	it("a go-ahead with an object is a permission for that object only", async () => {
+		const { pi } = enforce();
+		await pi.user("先别改");
+		await next(pi, "现在测试可以改了");
+		assert.equal(await edit(pi, "test/a.test.ts"), false);
+		assert.equal(await edit(pi, "src/a.ts"), true);
+	});
+
+	it("「」 names something; it is not a rule", async () => {
+		const { pi, heed } = enforce();
+		await pi.user("「中文讲课禁简繁」如果没问过我，标为待确认。");
+		assert.deepEqual(active(heed), []);
+	});
+});
+
+describe("E17 (cont.): what the replay found next", () => {
+	it("只读审查，不要修改文件、不要提交或推送 → go-ahead: edits and commits resume, push stays banned", async () => {
+		const { pi } = enforce();
+		await pi.user("只读审查，不要修改文件、不要提交或推送、不要启动 App。");
+		assert.equal(await edit(pi, "src/a.ts"), true);
+		assert.equal(await blocked(pi, "bash", { command: "git commit -am x" }), true);
+		await next(pi, "你接着做吧");
+		assert.equal(await edit(pi, "src/a.ts"), false);
+		assert.equal(await blocked(pi, "bash", { command: "git commit -am x" }), false);
+		assert.equal(await blocked(pi, "bash", { command: "git push" }), true);
+	});
+
+	it("我的卡片文件 names particular files: not read-only", async () => {
+		const { pi, heed } = enforce();
+		await pi.user("我感觉这个适配有些不兼容一些卡，你去看看，只许改我的代码不要动我的卡片文件");
+		assert.equal(heed.engine.active().some((p) => p.action === "modify" && p.resource === "*"), false);
+		assert.equal(await edit(pi, "extensions/reader/index.js"), false);
+	});
+
+	it("a long pasted prompt for another AI does not bind the assistant; the framing does", async () => {
+		const { pi, heed } = enforce();
+		const pasted = ["还能直接做的：注册赠送每天最多 20 分钟上限的领域逻辑。", "给其他 AI 的验收提示词", `你是验收审查员。只读审查，不要修改文件、不要提交或推送、不要启动 App。${"检查每一项。".repeat(120)}`, "你先看看这个，别推送"].join("\n\n");
+		await pi.user(pasted);
+		assert.deepEqual(heed.engine.active().map((p) => p.action), ["git_push"]);
 	});
 });

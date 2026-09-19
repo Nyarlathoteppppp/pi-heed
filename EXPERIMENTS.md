@@ -475,3 +475,54 @@ $0.000069.
 
 **Reproduce.** `PI_HEED_ENV_FILE=… node bench/experiments/e16-directive.ts`; `npm test`; `node bench/run.ts --judge replay`.
 
+## E17 · Replaying the author's own sessions
+
+**Question.** Scripted cases are written by the people building the thing. What does pi-heed do on real sessions?
+Every local pi session (21 sessions, 594 user messages, 9,090 tool calls, most recorded before pi-heed existed) was
+replayed through pi-heed in enforce mode with Jev, no budget cap, nothing executed (`bench/replay/`).
+
+**Findings.**
+
+1. *v0.7.4 made 424 rules and blocked 1,013 calls in 14 sessions.* Grouped by the rule that caused them, most came
+   from one habit: *"先别改，先看看和我讨论"*, *"你先看看别改"*, *"在我没有说改的时候不要改"*. These are holds: "not yet".
+   The user later said *"改吧"*, *"你接着做吧"*, *"确认并开始"*, *"没问题，整理成md"*, or just gave the task, and none of it
+   ended the ban. Reasons: the go-ahead threshold (0.9) was above what Jev gives such short replies (0.77–0.89); a
+   hold sentence also produced a second free-text ban that no go-ahead touched; a "you may also edit X" in the same
+   message vetoed the go-ahead.
+2. *Pasted material spoke as the user.* A prompt the user wrote for another AI (*"你是验收审查员。只读审查，不要修改
+   文件、不要提交或推送"*), another agent's review, a pi-goal template. Jev's per-line "does this restrict the assistant?"
+   (E16) said yes to the prompt's lines: they say "you".
+3. *Smaller parser errors*, each seen in real messages: 「中文讲课禁简繁」 (a quoted name) as a ban; *"只许改我的代码不要动我的卡片
+   文件"* as read-only (卡片文件 names particular files); *"不要运行 test.sh（会拉起测试宿主）"* as "don't modify tests";
+   *"不要修改文件、不要提交或推送"* losing the file ban (one target stopped the blanket); *"Stop 收尾"* (a product term) as a
+   negation; *"只看到"* as read-only.
+
+**Go-ahead, measured on real replies** (14 pairs from these sessions, hold → next message):
+
+| question | right | false lifts |
+|---|---|---|
+| current (prose), p ≥ 0.75 & conf ≥ 0.65 for holds | **12/14** | **0** |
+| structured, examples | 12/14 | 1 (and its examples leaked from the set) |
+| with dot paths to `earlier_policy` | 9/14 | 1 |
+
+**Pasted material** (25 real long messages, labelled): *"is this a task the user gives this assistant, with its
+constraints?"* 23/25, no material taken as a task (examples not from the set). Per line, *"who is this line from?"*:
+the user's own lines inside a paste ≥ 0.95, pasted report lines up to 0.91 → threshold 0.93/0.85.
+
+**Changes.** A ban in a "not yet" sentence, and every blanket read-only, carries `until: go_ahead`; a push ban never
+does. A go-ahead ends them: the rules recognise unambiguous imperatives (改吧 / 继续做吧 / 确认并开始 / 我们开始 / go
+ahead…, not questions), Jev the rest at 0.75/0.65. In a long multi-paragraph message only the first and last short
+paragraphs are parsed as the user's; bans in the middle count only when Jev says the paste is a task for this
+assistant or the line is the user's own. The parser fixes above. The E16 check now shares the main request (same
+answers on 18 items; one request instead of two, Jev calls per task 2.57 → 1.82).
+
+**Result.** Replay: 424 → 232 rules, 1,013 → 95 blocks, 42 → 16 incidents. Scripted benchmark (now 79 sessions incl.
+E08–E13 from these patterns): recall 98.5%, false block 0.0%, lifecycle 100%, task success 98.7%.
+
+**Caveats.** One user's sessions, labelled by us. Replay counts every later call after a missed lift; live, the first
+block makes the model ask. Replay has no extension tool descriptions, so the tool-relevance filter could not skip
+calls like `todo`.
+
+**Reproduce.** `node bench/replay/replay.ts` and `node bench/replay/analyze.ts` (your own sessions; output stays in
+`bench/replay/out/`, git-ignored); `node bench/experiments/e17-pasted.ts`.
+
