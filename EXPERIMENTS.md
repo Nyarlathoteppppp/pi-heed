@@ -23,6 +23,7 @@ decided and commit the script, so someone else can rerun it.
 | [E11](#e11--what-real-sessions-show) | What do the author's real sessions show? | Implicit lifts, scratch files, design guidance mistaken for bans, a 别人 parsing bug, heredoc `>` misread. Sets the v0.6 agenda |
 | [E13](#e13--cold-start-and-warm-up-on-typesafes-own-api) | Is there a cold start to pre-warm? | Only the first request per process (~900 ms → ~330 ms with a warm-up HEAD); no re-warming needed after 30 s idle |
 | [E14](#e14--live-benchmark-run-2-a-second-model-and-inform) | Does it hold with a second model, and does telling the model the rules help? | gemini: changing policy broken 5/10 without pi-heed, 0/10 with, 0 false blocks; inform halved attempts (n=5) |
+| [E15](#e15--a-pasted-task-spec-became-thirty-bans) | What happens when the user pastes a long task spec? | It became ~30 bogus bans (every English word a "path"); now none, and pi reads the key without a shell |
 | [E12](#e12--v06-real-session-fixes-and-a-shared-state-trap) | v0.6: fixing E11, and a shared-state trap | Real-session cases 3/6 → 6/6, false block 0.0%; one question needed its own request, because a shared state cost it 3 of 9 lifts |
 
 ---
@@ -408,3 +409,33 @@ outcomes, but that is five runs, so it stays opt-in (`PI_HEED_INFORM=1`) until m
 quota allows.
 
 **Reproduce.** `node bench/live/run.ts --reps 3 --reps-changing 5` (live); `node bench/live/rescore.ts <root>`.
+
+## E15 · A pasted task spec became thirty bans
+
+**Question.** The author pasted a 2,345-character task spec into pi. It was written for the model: *"不要继续新增
+classifier"*, *"不要再混用 none / unresolved / null"*, *"所有依赖旧状态的结果都要检查失效"*… `/heed status` showed about
+thirty policies in enforce mode, with `judge: none`. What went wrong?
+
+**Findings.** Two independent failures.
+
+1. *The rules read a spec as bans.* Every ASCII word inside a Chinese clause was taken as a path (`classifier`,
+   `repair`, `none`, `null`, `graph`…), so were slash-joined words (`invalidation/recompute`), and 依赖 as the verb
+   "depend on" became "no new dependencies". *"不能只改 X"* ("don't only change X") is a requirement to do more,
+   not a ban. Blanket words (所有 / 都) with no file verb triggered read-only.
+2. *No Jev.* That pi was started without the shell environment, so `PI_HEED_ENV_FILE` from `~/.zshrc` was
+   invisible. With no judge, the design-guidance check (E11) never ran to clear the free-text ones.
+
+**Changes.** A clause must contain a file verb (改/动/删/写入… / edit/modify/touch…) before its words are read as
+paths or as a blanket ban. A bare word in Chinese counts only right next to that verb (*"src 不能改"*,
+*"别动 src"*), and 改写 / 改成 / 改变 do not count. Dependencies need an install/add context (装/引入/新增 + 依赖,
+add/install/new/no + deps) in both languages. *"不能只 / not only"* is not a policy. Permissions may still name a path
+without a verb (*"但 notes.txt 可以"*). A settings file, `~/.pi/agent/pi-heed.json` (`envFile`, `mode`,
+`inform`, `bump`), covers pi started outside a shell, with the same precedence as pi-jev-context.
+
+**Result.** The spec now produces no file, dependency or read-only policy; its free-text sentences are left for
+Jev's guidance check. All thirty-odd phrases in the parser's regression list parse as before. The benchmark gained
+E07 (this spec, shortened) and was re-recorded on TypeSafe's own API: recall 97.8%, false block 0.0%, task success
+98.2% (55/56), real-session cases 7/7. A QQ user id that a v0.6 case had copied from a real session was replaced with
+a placeholder.
+
+**Reproduce.** `npm test` (the spec regression test); `node bench/run.ts --judge replay`.

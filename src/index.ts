@@ -1,4 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { classify, truncate } from "./actions.ts";
 import { exceptionCheck, judgeCheck, policyVerdict, RELEVANCE_TOOLS, toolRelevance } from "./gate.ts";
 import { JevJudge, type Judge, resolveTransport, settle } from "./judge.ts";
@@ -79,8 +82,30 @@ const LEGACY_KIND: Record<string, { action: "modify" | "install_deps"; resource:
 	no_deps: { action: "install_deps", resource: "*" },
 };
 
+/**
+ * Optional global settings for pi started without the shell environment (desktop app, pi-web), where
+ * PI_HEED_ENV_FILE from ~/.zshrc is not visible:
+ *   ~/.pi/agent/pi-heed.json   { "envFile": "/path/to/.env", "mode": "shadow", "inform": false, "bump": 0 }
+ * Precedence: session /heed mode > environment variables > this file > defaults.
+ */
+export function readSettingsFile(path = join(homedir(), ".pi", "agent", "pi-heed.json")): Record<string, unknown> {
+	try {
+		const raw = JSON.parse(readFileSync(path, "utf8"));
+		return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+	} catch {
+		return {};
+	}
+}
+
 export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
-	const env = options.env ?? process.env;
+	// Tests pass their own env and never read the user's settings file.
+	const file = options.env === undefined ? readSettingsFile() : {};
+	const fileEnv: Record<string, string> = {};
+	if (typeof file.envFile === "string") fileEnv.PI_HEED_ENV_FILE = file.envFile.replace(/^~(?=\/)/, homedir());
+	if (typeof file.mode === "string") fileEnv.PI_HEED_MODE = file.mode;
+	if (typeof file.inform === "boolean") fileEnv.PI_HEED_INFORM = file.inform ? "1" : "0";
+	if (typeof file.bump === "number") fileEnv.PI_HEED_BUMP = String(file.bump);
+	const env: NodeJS.ProcessEnv = { ...fileEnv, ...(options.env ?? process.env) };
 	const envMode = env.PI_HEED_MODE as Mode | undefined;
 	const envFlags: Partial<HeedConfig> = {
 		...(envMode && MODES.includes(envMode) ? { mode: envMode } : {}),

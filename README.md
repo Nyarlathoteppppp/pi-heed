@@ -8,7 +8,7 @@ Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effect
 
 [![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1-7c5cff)](https://pi.dev)
 [![Jev](https://img.shields.io/badge/powered%20by-TypeSafe%20Jev-f5a524)](https://docs.typesafe.ai)
-[![tests](https://img.shields.io/badge/tests-119%20passing-2ea043)](#development)
+[![tests](https://img.shields.io/badge/tests-122%20passing-2ea043)](#development)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
@@ -53,18 +53,19 @@ Resolution per call: the most specific resource wins (file > dir > tests > every
 
 ## Benchmark
 
-55 scripted sessions and 208 labelled decisions: basics, lifecycle, long sessions with compaction, adversarial input, and cases taken from the author's real sessions. Replayable offline from a recorded cassette. [Details and method →](bench/README.md)
+56 scripted sessions and 211 labelled decisions: basics, lifecycle, long sessions with compaction, adversarial input, and cases taken from the author's real sessions. Replayable offline from a recorded cassette. [Details and method →](bench/README.md)
 
 | | recall | false block | lifecycle | task success | cost / task |
 |---|---|---|---|---|---|
 | v0.3.0 + Jev | 71.4% | 5.2% | 70.5% | 61.2% | $0.000051 |
 | v0.4.0 + Jev | 95.2% | 0.6% | 95.5% | 93.9% | $0.000049 |
 | v0.5.1 + Jev | 97.6% | 0.0% | 100% | 98.0% | $0.000038 |
-| **v0.6.0, rules only** | 89.1% | 1.9% | 93.2% | 85.5% | $0 |
-| **v0.6.0 + Jev** | **97.8%** | **0.0%** | **100%** | **98.2%** | $0.000040 |
+| v0.6.0 + Jev | 97.8% | 0.0% | 100% | 98.2% | $0.000040 |
+| **v0.7.1, rules only** | 89.1% | 1.8% | 93.2% | 85.7% | $0 |
+| **v0.7.1 + Jev** (TypeSafe's own API) | **97.8%** | **0.0%** | **100%** | **98.2%** | $0.000047 |
 
 Sessions with at least one false block: 16.3% (v0.3) → **0.0%**. Two cases sit at a threshold and flip between live
-recordings. From v0.6 the benchmark includes six cases from real sessions (6/6). v0.6.0 rules-only numbers are
+recordings. From v0.6 the benchmark includes cases from real sessions (now 7/7). v0.6.0 rules-only numbers are
 lower than v0.5's only because the new real-session cases are harder.
 
 ### Does it matter with a real model?
@@ -88,7 +89,7 @@ own principle, *code handles control flow; Jev provides common-sense perception*
 engine decides, Jev only answers narrow questions about what a message means. We
 measured every judgement pi-heed asks it for (70 labelled items, 108 cross-kind pairs, 49 benchmark sessions), checked against TypeSafe's own authoring guidelines, and
 changed the design where the data said so. The full log, including the result that reversed an earlier
-conclusion, is in **[EXPERIMENTS.md](EXPERIMENTS.md)** (E01–E14). Per-judgement tables are in [bench/JEV-LAB.md](bench/JEV-LAB.md).
+conclusion, is in **[EXPERIMENTS.md](EXPERIMENTS.md)** (E01–E15). Per-judgement tables are in [bench/JEV-LAB.md](bench/JEV-LAB.md).
 
 **What we found, and what we changed because of it**
 
@@ -175,6 +176,11 @@ Semantic checks need one of the keys below.
 | `PI_HEED_ENV_FILE` | read either key from a dotenv file | |
 | `PI_HEED_MODEL` | pin a version | |
 
+pi started outside a shell (desktop app, pi-web) doesn't see `~/.zshrc`. Put the settings in
+`~/.pi/agent/pi-heed.json` instead: `{ "envFile": "/path/to/.env", "mode": "shadow" }` (also `inform`, `bump`).
+Environment variables win over the file, and `/heed mode` wins over both. `/heed status` shows `judge: none` when no
+key was found.
+
 **What leaves your machine** (only when a key is set): each message you type, for constraint understanding; and for mutating calls under a constraint, the constraint text plus the call (arguments truncated to 1500 chars; they can contain code).
 
 ## Commands
@@ -198,6 +204,7 @@ Semantic checks need one of the keys below.
 - *"Don't delete any data"* is judged violated by `rm -rf dist/` (p = 0.97). Whether build output is "data" is arguable.
 - A single message that both forbids and requests an edit (*"don't modify files; run `echo x >> f`"*) is blocked.
 - Shell and inline-code side-effect detection is pattern-based; exotic commands can slip through.
+- Without a Jev key, a long pasted spec can leave free-text policies that Jev would otherwise clear as design guidance. Only file verbs next to a path create file policies (E15).
 - `goal` scope only ends when Jev says a message starts a new task. Without a key it behaves like `session`.
 - The live benchmark covers two models (dragon-grok-4.6, gemini-3.8-flash); five of its twelve scenarios still await runs.
 
@@ -227,7 +234,7 @@ Semantic checks need one of the keys below.
 
 ```bash
 npm install
-npm test                                        # 119 tests, no network
+npm test                                        # 122 tests, no network
 node bench/run.ts --judge replay                # benchmark, offline
 npm run typecheck
 PI_HEED_ENV_FILE=~/.env npm run smoke:jev       # live Jev check

@@ -66,7 +66,9 @@ function cassetteFetch(): typeof fetch {
 			await new Promise((r) => setTimeout(r, hit!.ms));
 		}
 		try {
-			meter.cost += JSON.parse(hit.body)?.usage?.cost ?? 0;
+			// OpenRouter reports usage.cost; TypeSafe's own API reports tokens only ($0.042 per million input tokens).
+			const usage = JSON.parse(hit.body)?.usage ?? {};
+			meter.cost += typeof usage.cost === "number" ? usage.cost : (usage.input_tokens ?? 0) * 0.042e-6;
 		} catch {}
 		return new Response(hit.body, { status: hit.status, headers: { "content-type": "application/json" } });
 	}) as typeof fetch;

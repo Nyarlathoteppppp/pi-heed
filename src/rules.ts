@@ -8,7 +8,8 @@ interface Target {
 	resource: string;
 }
 
-const NOT_A_POLICY = /don'?t worry|don'?t know|don'?t forget|never mind(?!.*(?:permission|allow|exception))|别担心|不要紧|别客气|别急|别忘了|不要忘了?|记得/i;
+const NOT_A_POLICY =
+	/don'?t worry|don'?t know|don'?t forget|never mind(?!.*(?:permission|allow|exception))|别担心|不要紧|别客气|别急|别忘了|不要忘了?|记得|(?:不能|不要|别|不可以|不应该?)只|\bnot only\b|\bdon'?t (?:just|only)\b/i;
 
 const NEG_EN = /\b(?:don'?t|do not|never|must not|mustn'?t|shouldn'?t|should not|cannot|can'?t|no longer|stop|avoid)\b|\bno\s+(?:new\s+|more\s+)?(?:changes|edits|modifications|deps|dependencies|packages|pushing|push(?:es)?|commits?)\b|\bleave\b.+\balone\b|\bhands off\b|\bread[- ]only\b|\b(?:only|just) (?:review|look|read)\b/i;
 // 别 is only a prohibition before a verb: not in 别人 / 别的 / 别处 (others) or 区别 / 特别 / 识别 / 类别 … (real session: E10)
@@ -17,6 +18,12 @@ const NEG_ZH = new RegExp(`不要|${BIE}|不许|不准|禁止|不能|不可以|�
 const ALLOW_EN =
 	/\b(?:you can|you may|feel free to|go ahead|it'?s (?:fine|ok|okay)|is (?:fine|ok|okay)|are (?:fine|ok|okay)|are allowed|is allowed|allowed to|permission to|now (?:edit|fix|implement|apply|change|modify|write))\b|\b(?:apply|make) (?:the )?(?:fix|fixes|changes)\b/i;
 const ALLOW_ZH = /(?<![不别])可以|允许|没问题|随便|放开|解禁|(?:现在|开始|直接|去)(?:改|修|动手|写|实现)/;
+/** Verbs that act on files. A clause must have one before its words are read as paths (real session: E15). */
+const PROTECT_VERB = /\b(?:edit|edits|editing|modify|modifying|change|changing|touch|touching|write|writing|alter|delete|deleting|remove|rename|overwrite)\b|改|动|碰|删|写入|覆盖|重命名/i;
+const READ_ONLY_PHRASE = /只读|只看|read[- ]only|hands off|(?:only|just) (?:review|look|read)|\bno (?:code |file )?changes\b/i;
+/** A bare word in Chinese text is a path only right next to an edit verb: "改 src", "src 不能改", "别动 src". */
+const ZH_TOKEN_NEAR_VERB =
+	/(?:改|动|碰|删|修改|写入)\s*([A-Za-z_][\w-]{1,40})(?![\w./@-])|(?<![\w./@-])([A-Za-z_][\w-]{1,40})\s*(?:目录|文件夹|文件)?\s*(?:里的?|下的?)?\s*(?:都|也|还是)?\s*(?:不能|不要|别|不许|不准|不可以|可以|能)?\s*(?:改(?![写成变为进善正])|动|碰|删|修改)/g;
 const EDIT_VERB = /\b(?:edit|modify|change|touch|write|alter|implement|fix|apply|delete|remove|rewrite|update)\b|改|修|动|写|实现|删/i;
 
 const REVOKE_ALLOW = /(?:取消|撤销|收回|作废|撤回).{0,8}(?:允许|许可|授权|例外)|(?:允许|许可|授权|例外).{0,4}(?:取消|撤销|收回|作废)|\b(?:revoke|cancel|withdraw|take back)\b.{0,24}\b(?:permission|exception|that)\b/i;
@@ -73,12 +80,16 @@ function detectScope(clause: string): Scope {
 	return "session";
 }
 
-function pathTargets(clause: string): string[] {
+function pathTargets(clause: string, requireVerb = true): string[] {
 	const out = new Set<string>();
+	if (requireVerb && !PROTECT_VERB.test(clause)) return [];
 	// a path at the end of a sentence keeps the sentence's full stop: "…touch src/auth/token.ts."
 	for (const m of clause.matchAll(EXPLICIT_PATH)) out.add(m[1].replace(/[.,;:!?]+$/, ""));
 	if (/[一-鿿]/.test(clause)) {
-		for (const m of clause.matchAll(BARE_ZH_TOKEN)) if (!NOT_PATH_WORDS.has(m[1].toLowerCase())) out.add(m[1]);
+		for (const m of clause.matchAll(ZH_TOKEN_NEAR_VERB)) {
+			const tok = m[1] ?? m[2];
+			if (tok && !NOT_PATH_WORDS.has(tok.toLowerCase())) out.add(tok);
+		}
 	} else {
 		for (const m of clause.matchAll(BARE_EN_AFTER_VERB)) if (!NOT_PATH_WORDS.has(m[1].toLowerCase())) out.add(m[1]);
 	}
@@ -88,19 +99,27 @@ function pathTargets(clause: string): string[] {
 
 /** Explicit paths mentioned in a message's own words (for Jev's EXCEPTION/NARROW deltas, which carry no resource). */
 export function mentionedPaths(text: string): string[] {
-	return [...new Set(sentences(ownWords(text)).flatMap((s) => [...s.matchAll(EXPLICIT_PATH)].map((m) => m[1].replace(/[.,;:!?]+$/, ""))))];
+	return [...new Set(sentences(ownWords(text)).flatMap((s) => pathTargets(s, false)))];
 }
 
-function detectTargets(clause: string): Target[] {
+function detectTargets(clause: string, allow = false): Target[] {
 	const t: Target[] = [];
 	if (/\bpush(?:ing|ed|es)?\b|推送|推到|推上去/i.test(clause)) t.push({ action: "git_push", resource: "*" });
 	if (/\bcommit(?:ting|ted|s)?\b|提交/i.test(clause)) t.push({ action: "git_commit", resource: "*" });
-	if (/dependenc|\bdeps\b|\bpackages?\b(?![.\w])|\blibrar(?:y|ies)\b|依赖|第三方库|装包|(?:装|安装|引入|加)(?:新的?)?(?:包|库)/i.test(clause)) t.push({ action: "install_deps", resource: "*" });
+	// 依赖 is also the verb "depend on" (所有依赖旧状态的结果): Chinese needs an install/add context
+	if (
+		// English needs an add/install/new context too: "dependency graph" is not about installing anything
+		/\b(?:add|adding|install|installing|introduce|pull in|new|extra|additional|any)\b[^.。]{0,24}\b(?:dependenc\w*|deps|packages?(?![.\w])|librar(?:y|ies))\b|\bno\s+(?:new\s+|more\s+)?(?:dependenc\w*|deps|packages|libraries)\b/i.test(clause) ||
+		/(?:装|安装|引入|加|添加|新增|增加)\s*(?:新的?|任何|额外的?|第三方)?\s*(?:依赖|包|库)|新依赖|第三方(?:依赖|库|包)|依赖包|装包/.test(clause)
+	) {
+		t.push({ action: "install_deps", resource: "*" });
+	}
 	if (/\b(?:tests?|specs?|test files?)\b|测试|单测/i.test(clause) && !/\b(?:run|execute)\b.{0,12}\btests?\b|跑.{0,4}测试/i.test(clause)) {
 		t.push({ action: "modify", resource: "tests" });
 	}
-	for (const p of pathTargets(clause)) t.push({ action: "modify", resource: p });
-	if (t.length === 0 && GENERIC_MODIFY.test(clause)) t.push({ action: "modify", resource: "*" });
+	for (const p of pathTargets(clause, !allow)) t.push({ action: "modify", resource: p });
+	// "所有…都要检查" is not read-only: a blanket target needs a file verb or a read-only phrase
+	if (t.length === 0 && GENERIC_MODIFY.test(clause) && (allow || PROTECT_VERB.test(clause) || READ_ONLY_PHRASE.test(clause))) t.push({ action: "modify", resource: "*" });
 	return t;
 }
 
@@ -141,7 +160,7 @@ export function parseMessage(text: string, at: number): PolicyOp[] {
 			const except = /\b(?:except(?: for)?|other than|apart from)\s+(.+?)(?=$|[,，;；])|除了\s*(.+?)\s*(?:之外|以外)?(?=[,，;；]|其他|其它|都|$)|(\S+)\s*除外/i.exec(clause);
 			if (except && (NEG_EN.test(clause) || NEG_ZH.test(clause))) {
 				const part = except[1] ?? except[2] ?? except[3] ?? "";
-				for (const p of pathTargets(` ${part} `)) ops.push(spec("ALLOW", { action: "modify", resource: p }, scope, quote, at));
+				for (const p of pathTargets(` ${part} `, false)) ops.push(spec("ALLOW", { action: "modify", resource: p }, scope, quote, at));
 				clause = clause.replace(except[0], " ");
 			}
 
@@ -164,7 +183,9 @@ export function parseMessage(text: string, at: number): PolicyOp[] {
 				continue;
 			}
 			if (ALLOW_EN.test(clause) || ALLOW_ZH.test(clause)) {
-				if (targets.length) for (const t of targets) ops.push(spec("ALLOW", t, scope, quote, at));
+				// a permission may name a path without a verb ("但 notes.txt 可以")
+				const allowTargets = detectTargets(clause, true);
+				if (allowTargets.length) for (const t of allowTargets) ops.push(spec("ALLOW", t, scope, quote, at));
 				else if (EDIT_VERB.test(clause)) ops.push(spec("ALLOW", { action: "modify", resource: "*" }, scope, quote, at));
 			}
 		}

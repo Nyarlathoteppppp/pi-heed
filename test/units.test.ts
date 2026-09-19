@@ -216,3 +216,39 @@ describe("JevJudge: retries and answer validation (borrowed from thruwire/forema
 		await assert.rejects(new JevJudge(transport, bad.fn).decide({}, noulQ, new AbortController().signal), /malformed/);
 	});
 });
+
+describe("rules: a pasted task spec is not a list of tool bans (real session, E15)", () => {
+	const spec = [
+		"基于当前 pipeline 做最小必要优化。不要继续新增 classifier，不要大重构。",
+		"用户纠正旧理解后，不能只改 repair 结果，所有依赖旧状态的结果都要检查失效。",
+		"* speaker_relation / message_relation 不得残留旧绑定",
+		"repair target 不要默认最后一句。",
+		"不要做复杂 dependency graph，只实现轻量 invalidation/recompute。",
+		"不要再混用 none / unresolved / null / jev_unavailable。",
+		"不要增加更多维度，不让 Jev 改写回复。",
+	].join("\n\n");
+	it("yields no file, dependency or read-only policy (free-text ones are left to Jev's guidance check)", () => {
+		const nonCustom = parseMessage(spec, 0).filter((o: any) => o.op !== "add" || o.spec.action !== "custom");
+		assert.deepEqual(nonCustom, []);
+	});
+	it("real bans next to it still parse", () => {
+		assert.deepEqual(kinds("所有依赖旧状态的结果都要检查，但别改 config.yaml"), ["protect_path"]);
+		assert.deepEqual(kinds("不要引入新的依赖"), ["no_deps"]);
+		assert.deepEqual(kinds("classifier 目录不能改"), ["protect_path"]);
+	});
+});
+
+describe("settings file for pi started outside a shell", () => {
+	it("reads ~/.pi/agent/pi-heed.json-style files and ignores broken ones", async () => {
+		const { mkdtempSync, writeFileSync } = await import("node:fs");
+		const { join } = await import("node:path");
+		const { tmpdir } = await import("node:os");
+		const { readSettingsFile } = await import("../src/index.ts");
+		const d = mkdtempSync(join(tmpdir(), "heed-"));
+		writeFileSync(join(d, "ok.json"), JSON.stringify({ envFile: "~/x/.env", mode: "enforce" }));
+		writeFileSync(join(d, "bad.json"), "{not json");
+		assert.deepEqual(readSettingsFile(join(d, "ok.json")), { envFile: "~/x/.env", mode: "enforce" });
+		assert.deepEqual(readSettingsFile(join(d, "bad.json")), {});
+		assert.deepEqual(readSettingsFile(join(d, "missing.json")), {});
+	});
+});
