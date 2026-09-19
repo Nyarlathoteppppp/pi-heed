@@ -3,13 +3,10 @@
 //
 //   PI_HEED_ENV_FILE=... node bench/live/run.ts --reps 3 --parallel 3 [--only S1,S2] [--out bench/live/results.json]
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
-import { exec as execCb } from "node:child_process";
-import { SCENARIOS, type Helpers, type Scenario } from "./scenarios.ts";
-
-const exec = promisify(execCb);
+import { type Result, score, sessionFile, sh } from "./lib.ts";
+import { SCENARIOS, type Scenario } from "./scenarios.ts";
 const arg = (n: string, d?: string) => (process.argv.includes(`--${n}`) ? process.argv[process.argv.indexOf(`--${n}`) + 1] : d);
 const reps = Number(arg("reps", "3"));
 /** reps for scenarios where the policy changes mid-session (pi-heed's target) */
@@ -34,32 +31,6 @@ interface Job {
 	rep: number;
 	dir: string;
 }
-interface Result {
-	scenario: string;
-	condition: string;
-	rep: number;
-	/** provider/model the session actually used, read from the session file */
-	model?: string;
-	/** what the model did that broke the constraint (from git and the calls that actually ran), or false */
-	violated: string | false;
-	succeeded: boolean;
-	blocked: string[];
-	heedDecisions: number;
-	turnsCompleted: number;
-	hangs: number;
-	seconds: number;
-	error?: string;
-}
-
-async function sh(cmd: string, cwd: string) {
-	try {
-		const { stdout, stderr } = await exec(cmd, { cwd, timeout: 60_000, maxBuffer: 10 << 20 });
-		return { ok: true, out: stdout + stderr };
-	} catch (e: any) {
-		return { ok: false, out: `${e.stdout ?? ""}${e.stderr ?? ""}` };
-	}
-}
-
 async function setup(job: Job) {
 	rmSync(job.dir, { recursive: true, force: true });
 	const repo = join(job.dir, "repo");
@@ -73,13 +44,6 @@ async function setup(job: Job) {
 		await sh("git init -q --bare -b main ../remote.git && git remote add origin ../remote.git && git push -q -u origin main", repo);
 	}
 	return repo;
-}
-
-function sessionFile(dir: string): string | undefined {
-	const s = join(dir, "sessions");
-	if (!existsSync(s)) return undefined;
-	const f = readdirSync(s).filter((x) => x.endsWith(".jsonl"));
-	return f.length ? join(s, f[0]) : undefined;
 }
 
 function sessionLines(dir: string): number {
@@ -132,56 +96,7 @@ async function runJob(job: Job): Promise<Result> {
 		}
 		completed++;
 	}
-	const h: Helpers = {
-		changed: async () => {
-			const diff = await sh("git diff --name-only $(git rev-list --max-parents=0 HEAD)", repo);
-			const untracked = await sh("git ls-files --others --exclude-standard", repo);
-			return [...new Set([...diff.out.split("\n"), ...untracked.out.split("\n")].map((s) => s.trim()).filter(Boolean))];
-		},
-		read: (p) => (existsSync(join(repo, p)) ? readFileSync(join(repo, p), "utf8") : undefined),
-		exists: (p) => existsSync(join(repo, p)),
-		sh: (cmd) => sh(cmd, repo),
-		executed: () => executed,
-	};
-	const blocked: string[] = [];
-	let heedDecisions = 0;
-	const models = new Set<string>();
-	const executed: Array<{ tool: string; input: Record<string, any>; turn: number }> = [];
-	const f = sessionFile(job.dir);
-	if (f) {
-		const calls = new Map<string, { tool: string; input: Record<string, any>; turn: number }>();
-		let turnNo = 0;
-		for (const line of readFileSync(f, "utf8").split("\n").filter(Boolean)) {
-			const e = JSON.parse(line);
-			if (e.type === "message") {
-				const m = e.message;
-				if (m.role === "user") turnNo++;
-				if (m.role === "assistant") {
-					if (m.provider) models.add(`${m.provider}/${m.model}`);
-					for (const part of m.content ?? []) if (part.type === "toolCall") calls.set(part.id, { tool: part.name, input: part.arguments ?? {}, turn: turnNo });
-				}
-				if (m.role === "toolResult" && !m.isError && calls.has(m.toolCallId)) executed.push(calls.get(m.toolCallId)!);
-			}
-			if (e.type === "custom" && e.customType === "heed" && e.data?.kind === "gate") {
-				heedDecisions++;
-				if (e.data.acted) blocked.push(`${e.data.summary}  [${e.data.policy ?? e.data.verdict?.by}]`);
-			}
-		}
-	}
-	return {
-		scenario: job.scenario.id,
-		condition: job.condition,
-		rep: job.rep,
-		model: [...models].join(","),
-		violated: await job.scenario.violated(h),
-		succeeded: await job.scenario.succeeded(h),
-		blocked,
-		heedDecisions,
-		turnsCompleted: completed,
-		hangs,
-		seconds: Math.round((Date.now() - t0) / 1000),
-		...(error ? { error } : {}),
-	};
+	return score(job.scenario, job.condition, job.rep, job.dir, { turnsCompleted: completed, hangs, seconds: Math.round((Date.now() - t0) / 1000), error });
 }
 
 const jobs: Job[] = [];

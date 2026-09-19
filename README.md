@@ -8,7 +8,7 @@ Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effect
 
 [![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1-7c5cff)](https://pi.dev)
 [![Jev](https://img.shields.io/badge/powered%20by-TypeSafe%20Jev-f5a524)](https://docs.typesafe.ai)
-[![tests](https://img.shields.io/badge/tests-109%20passing-2ea043)](#development)
+[![tests](https://img.shields.io/badge/tests-119%20passing-2ea043)](#development)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
@@ -69,16 +69,17 @@ lower than v0.5's only because the new real-session cases are harder.
 
 ### Does it matter with a real model?
 
-36 real pi sessions with `dragon-grok-4.6` ([bench/live/](bench/live/README.md)): six small repos, each tempting the model to break a
-constraint stated in an earlier turn, with pi-heed off vs enforce. Outcomes are read from git, not from the model.
+Real pi sessions ([bench/live/](bench/live/README.md)): small repos, each tempting the model to break a rule stated in
+an earlier turn, pi-heed off vs on. Outcomes are read from git, not from the model. Two models so far.
 
-| | model broke the constraint: pi-heed off | pi-heed enforce | false blocks |
+| | model broke the rule: pi-heed off | pi-heed on | false blocks |
 |---|---|---|---|
-| constraint stated once, unchanged (5 scenarios) | 0 / 15 | 0 / 15 | 0 |
-| **constraint changed mid-session** ("only `math.js`" → "make sure the tests pass") | **3 / 3** | **0 / 3** | 0 |
+| rule stated once, unchanged (grok 15 runs, gemini 15) | 0 / 30 | 0 / 30 | 0 |
+| **rule changed mid-session** (grok S5 3 runs; gemini S5 + S7, 10 runs) | **8 / 13** | **0 / 13** | 0 |
 
-This model keeps a simple rule on its own. A rule that changed during the conversation, it broke every time,
-and pi-heed caught every time without blocking the allowed work. That is what pi-heed is for.
+Both models keep a simple rule on their own. A rule that changed during the conversation, they broke most of the
+time. In one case gemini "undid" a test the user had asked for after the permission was revoked. pi-heed caught
+every one without blocking the allowed work. That is what pi-heed is for.
 
 ## Experiment report: using a fast decision model well
 
@@ -87,7 +88,7 @@ own principle, *code handles control flow; Jev provides common-sense perception*
 engine decides, Jev only answers narrow questions about what a message means. We
 measured every judgement pi-heed asks it for (70 labelled items, 108 cross-kind pairs, 49 benchmark sessions), checked against TypeSafe's own authoring guidelines, and
 changed the design where the data said so. The full log, including the result that reversed an earlier
-conclusion, is in **[EXPERIMENTS.md](EXPERIMENTS.md)** (E01–E12). Per-judgement tables are in [bench/JEV-LAB.md](bench/JEV-LAB.md).
+conclusion, is in **[EXPERIMENTS.md](EXPERIMENTS.md)** (E01–E14). Per-judgement tables are in [bench/JEV-LAB.md](bench/JEV-LAB.md).
 
 **What we found, and what we changed because of it**
 
@@ -143,6 +144,16 @@ Rules work immediately. For the semantic layer, give it a Jev key (see below). I
 
 Reads (`read`, `grep`, `find`, `ls`, non-mutating shell) are never checked.
 
+## Optional
+
+```bash
+export PI_HEED_INFORM=1   # write the active rules into the system prompt (in the live benchmark: half the forbidden attempts, n=5)
+export PI_HEED_BUMP=0.7   # an unsure free-text violation stops the first attempt and asks the model to check with you in chat
+```
+
+Both are off by default until there is more data. There are no dialogs: pi-heed talks to the model, and the model
+talks to you.
+
 ## Safety properties
 
 - **Shadow by default.** `off` · `shadow` · `enforce`, persisted per session.
@@ -177,7 +188,8 @@ Semantic checks need one of the keys below.
 /heed add <text>                 add a free-text prohibition by hand
 /heed drop <id>
 /heed log [n]                    recent decisions (with pre-judge / wait times)
-/heed label <good|bad> [note]    label the latest decision for calibration
+/heed review [n]                 recent decisions, numbered
+/heed label [n] <good|bad> [note]  label decision n from /heed review (default: the latest)
 ```
 
 ## Known limitations
@@ -187,7 +199,7 @@ Semantic checks need one of the keys below.
 - A single message that both forbids and requests an edit (*"don't modify files; run `echo x >> f`"*) is blocked.
 - Shell and inline-code side-effect detection is pattern-based; exotic commands can slip through.
 - `goal` scope only ends when Jev says a message starts a new task. Without a key it behaves like `session`.
-- The live benchmark so far covers one model (dragon-grok-4.6) and six scenarios.
+- The live benchmark covers two models (dragon-grok-4.6, gemini-3.8-flash); five of its twelve scenarios still await runs.
 
 ## Related work
 
@@ -205,15 +217,17 @@ Semantic checks need one of the keys below.
 - [x] Benchmark: lifecycle, long sessions, compaction, adversarial ([bench/](bench/README.md))
 - [x] Fewer Jev-decided calls per session: per-policy tool relevance (E07)
 - [x] Fix what real sessions showed (E11 → v0.6): scratch files, design guidance, implicit lifts, inline code, extension tools
-- [ ] Live benchmark across more models and more changing-policy scenarios
-- [ ] Faster labelling (`/heed review`), then recalibrate thresholds from real sessions; E05 suggests 0.9 is conservative
+- [x] Live benchmark on a second model, and "inform" (E14)
+- [x] Faster labelling (`/heed review`, `/heed label n`)
+- [ ] Live benchmark S8–S12, more models, more runs per scenario
+- [ ] Recalibrate thresholds from labelled real sessions; E05 suggests 0.9 is conservative
 - [ ] Threshold calibration from `/heed label` data
 
 ## Development
 
 ```bash
 npm install
-npm test                                        # 109 tests, no network
+npm test                                        # 119 tests, no network
 node bench/run.ts --judge replay                # benchmark, offline
 npm run typecheck
 PI_HEED_ENV_FILE=~/.env npm run smoke:jev       # live Jev check
