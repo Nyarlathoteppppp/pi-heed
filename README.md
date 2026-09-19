@@ -8,7 +8,7 @@ Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effect
 
 [![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1-7c5cff)](https://pi.dev)
 [![Jev](https://img.shields.io/badge/powered%20by-TypeSafe%20Jev-f5a524)](https://docs.typesafe.ai)
-[![tests](https://img.shields.io/badge/tests-139%20passing-2ea043)](#development)
+[![tests](https://img.shields.io/badge/tests-165%20passing-2ea043)](#development)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
@@ -107,7 +107,7 @@ own principle, *code handles control flow; Jev provides common-sense perception*
 engine decides, Jev only answers narrow questions about what a message means. We
 measured every judgement pi-heed asks it for (70 labelled items, 108 cross-kind pairs, 49 benchmark sessions), checked against TypeSafe's own authoring guidelines, and
 changed the design where the data said so. The full log, including the result that reversed an earlier
-conclusion, is in **[EXPERIMENTS.md](EXPERIMENTS.md)** (E01–E17). Per-judgement tables are in [bench/JEV-LAB.md](bench/JEV-LAB.md).
+conclusion, is in **[EXPERIMENTS.md](EXPERIMENTS.md)** (E01–E19). Per-judgement tables are in [bench/JEV-LAB.md](bench/JEV-LAB.md).
 
 **What we found, and what we changed because of it**
 
@@ -242,6 +242,27 @@ key was found.
   measurements bear on foreman's open questions: a shared large state can cost a question accuracy (E12), and
   narrow questions beat broad ones (E09).
 
+## Direction: the main model understands, pi-heed checks receipts
+
+Up to 0.8, pi-heed read every user message itself (parser + Jev) to decide what the rules were. That layer grew
+(go-ahead detection, paste gates, authorship) and it was where the false blocks came from. Main models understand
+the user better every release; re-interpreting them in a second layer duplicates that and adds its own mistakes.
+
+From 0.9 there is a second pipeline, the **ledger**:
+
+- The main model records the user's hard rules with `heed_record`, quoting the user's exact words, and ends them
+  with `heed_lift`. Temporary permissions ("just this once") are `allow` records with scope `once` or `run`.
+- pi-heed does not interpret. It checks the receipt (the quote is in a message the user typed, and a lift's quote
+  is newer than the rule) and enforces the recorded rules at tool-call time, deterministically.
+- Jev is left with three narrow judgements: does a call fall under a rule's `unless` ("unless it only fixes a
+  typo"), does a call break a free-text rule ("never call the production API"), and does the user's message really
+  take a rule back (lifts and lasting permissions).
+
+Live, same model and scenarios (E19): 0 violations in every condition; false blocks interpreter 3, ledger 1 (fixed
+since), ledger + parser fallback 3, all of the parser conditions' from the parser. The model recorded every rule
+the scenarios stated and nothing where there was none. 0.9 still defaults to the interpreter; the ledger is
+selected with `PI_HEED_PIPELINE=ledger` while it is evaluated.
+
 ## Roadmap
 
 - [ ] Suggest-only rollback to the last verified checkpoint (with [pi-rewind-hook](https://github.com/nicobailon/pi-rewind-hook))
@@ -250,7 +271,9 @@ key was found.
 - [x] Fix what real sessions showed (E11 → v0.6): scratch files, design guidance, implicit lifts, inline code, extension tools
 - [x] Live benchmark on a second model, and "inform" (E14)
 - [x] Faster labelling (`/heed review`, `/heed label n`)
-- [ ] Live benchmark S8–S12, more models, more runs per scenario
+- [x] Live benchmark S8–S15 (E19)
+- [ ] Ledger as the default, then remove the interpreter (`understand.ts`, the parser's heuristics)
+- [ ] More models and runs for the ledger, especially weaker models that may not record rules
 - [ ] Recalibrate thresholds from labelled real sessions; E05 suggests 0.9 is conservative
 - [ ] Threshold calibration from `/heed label` data
 
