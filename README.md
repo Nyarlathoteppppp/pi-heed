@@ -192,7 +192,7 @@ key was found.
 /heed explain <id>               which of your sentences a policy came from, its exceptions
 /heed mode <off|shadow|enforce>
 /heed add <text>                 add a free-text prohibition by hand
-/heed drop <id>        # or: /heed drop all
+/heed drop <id>|all                remove one rule, or all of them
 /heed log [n]                    recent decisions (with pre-judge / wait times)
 /heed review [n]                 recent decisions, numbered
 /heed label [n] <good|bad> [note]  label decision n from /heed review (default: the latest)
