@@ -8,7 +8,7 @@ Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effect
 
 [![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1-7c5cff)](https://pi.dev)
 [![Jev](https://img.shields.io/badge/powered%20by-TypeSafe%20Jev-f5a524)](https://docs.typesafe.ai)
-[![tests](https://img.shields.io/badge/tests-125%20passing-2ea043)](#development)
+[![tests](https://img.shields.io/badge/tests-130%20passing-2ea043)](#development)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
@@ -61,8 +61,8 @@ Resolution per call: the most specific resource wins (file > dir > tests > every
 | v0.4.0 + Jev | 95.2% | 0.6% | 95.5% | 93.9% | $0.000049 |
 | v0.5.1 + Jev | 97.6% | 0.0% | 100% | 98.0% | $0.000038 |
 | v0.6.0 + Jev | 97.8% | 0.0% | 100% | 98.2% | $0.000040 |
-| **v0.7.1, rules only** | 89.1% | 1.8% | 93.2% | 85.7% | $0 |
-| **v0.7.1 + Jev** (TypeSafe's own API) | **97.8%** | **0.0%** | **100%** | **98.2%** | $0.000047 |
+| **v0.7.4, rules only** | 89.1% | 1.8% | 93.2% | 85.7% | $0 |
+| **v0.7.4 + Jev** (TypeSafe's own API) | **97.8%** | **0.0%** | **100%** | **98.2%** | $0.000069 |
 
 Sessions with at least one false block: 16.3% (v0.3) → **0.0%**. Two cases sit at a threshold and flip between live
 recordings. From v0.6 the benchmark includes cases from real sessions (now 7/7). v0.6.0 rules-only numbers are
@@ -89,7 +89,7 @@ own principle, *code handles control flow; Jev provides common-sense perception*
 engine decides, Jev only answers narrow questions about what a message means. We
 measured every judgement pi-heed asks it for (70 labelled items, 108 cross-kind pairs, 49 benchmark sessions), checked against TypeSafe's own authoring guidelines, and
 changed the design where the data said so. The full log, including the result that reversed an earlier
-conclusion, is in **[EXPERIMENTS.md](EXPERIMENTS.md)** (E01–E15). Per-judgement tables are in [bench/JEV-LAB.md](bench/JEV-LAB.md).
+conclusion, is in **[EXPERIMENTS.md](EXPERIMENTS.md)** (E01–E16). Per-judgement tables are in [bench/JEV-LAB.md](bench/JEV-LAB.md).
 
 **What we found, and what we changed because of it**
 
@@ -106,6 +106,7 @@ conclusion, is in **[EXPERIMENTS.md](EXPERIMENTS.md)** (E01–E15). Per-judgemen
 | 9 | **Don't ask Jev what the rules already know** | "an edit changes files": p ≈ 0.7 | Side effects, paths and scopes are deterministic rules; Jev only judges meaning |
 | 11 | **One request, one state: isolate a question that other context distracts** | go-ahead inside the shared state caught 5/9 lifts; in its own minimal request **8/9**, 0 false | go-ahead asked in a parallel request with only the message and the earlier rule |
 | 10 | **Only Jev-decided calls compound, so decide fewer** | deterministic decisions never erred · Jev-influenced decisions per benchmark: 52 → **12** with a per-prohibition tool-relevance check | Asks once per prohibition which tools can't break it, and skips those calls (0 wrong skips) |
+| 12 | **The parser can't tell who a "don't" is for; Jev can** | "explain why people say never force push", "write a hook that blocks pushes", "I don't mind if you edit the tests": parser made bans from 11 of 22 such messages · Jev *"does this restrict the assistant?"*: 13/13 caught (p ≥ 0.96), **0/18 real rules dropped** (p ≤ 0.19) | Every ban the parser adds is checked in its own request; confident `not_a_rule` ends it (E16) |
 
 Cost stayed negligible throughout: ≈ $0.00004 per session, about 1.7 Jev calls.
 
@@ -205,7 +206,8 @@ key was found.
 - *"Don't delete any data"* is judged violated by `rm -rf dist/` (p = 0.97). Whether build output is "data" is arguable.
 - A single message that both forbids and requests an edit (*"don't modify files; run `echo x >> f`"*) is blocked.
 - Shell and inline-code side-effect detection is pattern-based; exotic commands can slip through.
-- Without a Jev key, a long pasted spec can leave free-text policies that Jev would otherwise clear as design guidance. Only file verbs next to a path create file policies (E15).
+- **Without a Jev key the parser alone decides what is a rule**, and it takes "explain why people say never push" or "write a hook that blocks pushes" as bans (11 of 22 such messages in E16). With a key, 0 of 22. Check `/heed status`, and `/heed drop all` clears a bad batch.
+- Bash commands are judged on the paths they write when those can be read off the command (redirects, `cp`/`mv`/`rm`/`mkdir`/`tee`); otherwise on every path they mention, which is the cautious side.
 - `goal` scope only ends when Jev says a message starts a new task. Without a key it behaves like `session`.
 - The live benchmark covers two models (dragon-grok-4.6, gemini-3.8-flash); five of its twelve scenarios still await runs.
 

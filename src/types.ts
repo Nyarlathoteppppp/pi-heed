@@ -13,6 +13,8 @@ export interface ToolAction {
 	/** Runs a test suite (used by REQUIRE_BEFORE "run tests before …"). */
 	runsTests: boolean;
 	paths: string[];
+	/** bash only: the paths it writes, when every write in the command could be read off it; else undefined. */
+	writes?: string[];
 	/** One-line human-readable description, used as evidence. */
 	summary: string;
 }

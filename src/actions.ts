@@ -10,6 +10,7 @@ const MUTATING_BASH: RegExp[] = [
 	/(?<![0-9&>])>{1,2}(?!\s*&|\s*\/dev\/null)\s*[^\s&|;]/, // redirect into a file (not 2>&1, not /dev/null)
 	/\b(?:rm|rmdir|mv|cp|mkdir|touch|chmod|chown|ln|truncate|dd|tee|patch|unzip|tar\s+-?x)\b/,
 	/\bsed\s+(?:-[a-zA-Z]*i|--in-place)/,
+	/\bfind\b.*\s-(?:delete\b|exec(?:dir)?\s+(?:rm|mv|cp|chmod|chown|sed|perl|truncate|tee)\b)/,
 	/\bperl\s+-[a-zA-Z]*i/,
 	/\bgit\s+(?:commit|push|reset|checkout|switch|merge|rebase|apply|am|stash|add|rm|mv|restore|clean|cherry-pick|revert|tag|branch\s+-[dDmM])\b/,
 	/\b(?:npm|pnpm|yarn|bun)\s+(?:install|i|add|remove|rm|uninstall|update|upgrade|link|publish)\b/,
@@ -77,17 +78,20 @@ export function classify(toolName: string, input: Record<string, unknown>): Tool
 	if (toolName === "bash") {
 		const command = str(input.command) ?? "";
 		const { shell, code } = splitInterpreterCode(command);
-		const mutates = MUTATING_BASH.some((re) => re.test(shell)) || code.some((c) => CODE_WRITES.some((re) => re.test(c)));
-		const installsDeps = DEP_INSTALL.some((re) => re.test(command));
+		const mutates = MUTATING_BASH.some((re) => re.test(withoutLiterals(shell))) || code.some((c) => CODE_WRITES.some((re) => re.test(c)));
+		const ops = withoutLiterals(command);
+		const installsDeps = DEP_INSTALL.some((re) => re.test(ops));
+		const writes = mutates && !installsDeps ? writtenPaths(shell) : undefined;
 		return {
 			toolName,
 			effect: "exec",
 			mutates: mutates || installsDeps,
 			installsDeps,
-			gitPush: GIT_PUSH.test(command),
-			gitCommit: GIT_COMMIT.test(command),
+			gitPush: GIT_PUSH.test(ops),
+			gitCommit: GIT_COMMIT.test(ops),
 			runsTests: RUNS_TESTS.test(command),
 			paths: extractPaths(command),
+			...(writes && !code.length ? { writes } : {}),
 			summary: `bash: ${truncate(command, 200)}`,
 		};
 	}
@@ -95,8 +99,59 @@ export function classify(toolName: string, input: Record<string, unknown>): Tool
 	return { toolName, effect: "unknown", mutates: false, installsDeps: false, gitPush: false, gitCommit: false, runsTests: false, paths: [], summary: `${toolName} ${truncate(JSON.stringify(input), 200)}` };
 }
 
+// A string can still run as a command through these; then nothing is stripped.
+const EVALUATES = /\b(?:sh|bash|zsh|dash|su|fish)\s+-\w*c\b|\b(?:ssh|eval|parallel|watch)\b|\b(?:docker|kubectl|podman)\s+exec\b|\bnpx\s+-c\b|\|\s*(?:sh|bash|zsh|xargs)\b|\bxargs\b|\$\(|`/;
+
+/** The command without echo/printf arguments and quoted text, so "echo remember to git push" is not a push. */
+export function withoutLiterals(command: string): string {
+	if (EVALUATES.test(command)) return command;
+	return command
+		.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''")
+		.replace(/\b(?:echo|printf)\b[^;&|\n>]*/g, "echo");
+}
+
+const SEGMENT_SPLIT = /&&|\|\||;|\n|\|/;
+const REDIRECT = /(?<![<>&])\d?>>?\s*([^\s;&|<>]+)/g;
+/** Commands whose every non-flag argument is written to. */
+const WRITES_ALL = new Set(["rm", "rmdir", "mkdir", "touch", "chmod", "chown", "truncate", "mv", "tee", "unlink"]);
+/** Commands that write only their last argument. */
+const WRITES_LAST = new Set(["cp", "ln", "rsync", "install"]);
+/** Commands that write nothing besides their redirects. */
+const READS = new Set(["cat", "echo", "printf", "grep", "rg", "ls", "head", "tail", "wc", "sort", "uniq", "diff", "find", "jq", "awk", "cut", "tr", "node", "python", "python3", "true", "test", "["]);
+
+/**
+ * The paths a shell command writes, or undefined when some write cannot be read off the command
+ * (cd, substitutions, sed -i, git, package managers, find -exec…): then callers fall back to every path mentioned.
+ */
+export function writtenPaths(shell: string): string[] | undefined {
+	if (EVALUATES.test(shell) || /\bcd\b|\bpushd\b/.test(shell)) return undefined;
+	const out: string[] = [];
+	for (const raw of shell.split(SEGMENT_SPLIT)) {
+		const segment = raw.trim();
+		if (!segment) continue;
+		for (const m of segment.matchAll(REDIRECT)) if (!m[1].startsWith("&") && !m[1].startsWith("/dev/")) out.push(unquote(m[1]));
+		const words = segment.replace(REDIRECT, " ").trim().split(/\s+/).filter((w) => !/^\w+=/.test(w));
+		if (words[0] === "sudo") words.shift();
+		const [cmd = "", ...rest] = words;
+		const args = rest.filter((a) => !a.startsWith("-")).map(unquote);
+		if (WRITES_ALL.has(cmd)) out.push(...args);
+		else if (WRITES_LAST.has(cmd)) {
+			if (args.length) out.push(args.at(-1)!);
+		} else if (READS.has(cmd)) {
+			if (cmd === "find" && /-(?:delete|exec|execdir|ok|fprint)/.test(segment)) return undefined;
+		} else if (MUTATING_BASH.some((re) => re.test(segment.replace(REDIRECT, " ")))) return undefined;
+	}
+	return out.length ? out : undefined;
+}
+
+function unquote(s: string): string {
+	return s.replace(/^['"]|['"]$/g, "");
+}
+
 function extractPaths(command: string): string[] {
-	return [...command.matchAll(/(?:^|\s)[\x60'"]?((?:\.{0,2}\/)?[\w@.-]+(?:\/[\w@.-]+)+|[\w@-]+\.[A-Za-z]{1,8})(?=[\x60'"]?(?:\s|$|;|\||&))/g)].map((m) => m[1]);
+	// a bare directory is a path when it follows cd/pushd/find ("cd test && rm a.ts", "find test -delete")
+	const dirs = [...command.matchAll(/\b(?:cd|pushd|find)\s+(?:-\S+\s+)*['"]?([\w@.-]+)\/?['"]?(?=\s|$|;|&|\|)/g)].map((m) => `${m[1]}/`).filter((d) => d !== "./" && d !== "../");
+	return [...dirs, ...[...command.matchAll(/(?:^|\s)[\x60'"]?((?:\.{0,2}\/)?[\w@.-]+(?:\/[\w@.-]+)+|[\w@-]+\.[A-Za-z]{1,8})(?=[\x60'"]?(?:\s|$|;|\||&))/g)].map((m) => m[1])];
 }
 
 export function truncate(s: string, n: number): string {

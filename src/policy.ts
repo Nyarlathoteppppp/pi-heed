@@ -218,7 +218,9 @@ export class PolicyEngine {
 	 */
 	resolve(action: ToolAction, satisfied: (p: Prerequisite) => boolean = () => false, cwd?: string): Resolution {
 		const candidates = this.active().filter((p) => p.action !== "custom" && !(p.effect === "REQUIRE_BEFORE" && p.prerequisite && satisfied(p.prerequisite)));
-		const targets: Array<string | undefined> = action.paths.length ? action.paths : [undefined];
+		// A bash command that only writes to known paths is judged on those, not on everything it reads.
+		const paths = action.writes ?? action.paths;
+		const targets: Array<string | undefined> = paths.length ? paths : [undefined];
 		const allowIds = new Set<string>();
 		for (const target of targets) {
 			const applicable = candidates.filter((p) => applies(p, action, target, cwd));

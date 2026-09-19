@@ -512,3 +512,54 @@ describe("commands: on/off", () => {
 		assert.match(cmd.description, /on \| off/);
 	});
 });
+
+describe("E16: parsed restrictions that do not restrict the assistant", () => {
+	const notRule = choice("not_a_rule", 0.99, 0.97);
+	const binds = choice("restricts_assistant", 0.98, 0.95);
+
+	it("an explanation request is not a push ban; the real rule in the next message is kept", async () => {
+		const { pi, heed } = enforce(deltaJudge((k) => (k.startsWith("dir_") ? (heed.engine.all().length === 1 ? notRule : binds) : undefined)));
+		await pi.user("为什么大家说不要 force push？解释一下。");
+		await heed.settled();
+		assert.equal(heed.engine.active().length, 0);
+		assert.match(heed.engine.history()[0].provenance.endReason!, /not a restriction/);
+		await pi.user("不要 push，我来 review。");
+		await heed.settled();
+		assert.equal(await blocked(pi, "bash", { command: "git push" }), true);
+	});
+
+	it("low confidence keeps the rule", async () => {
+		const { pi, heed } = enforce(deltaJudge((k) => (k.startsWith("dir_") ? choice("not_a_rule", 0.95, 0.6) : undefined)));
+		await pi.user("Don't push.");
+		await heed.settled();
+		assert.equal(heed.engine.active().length, 1);
+	});
+});
+
+describe("bash: what a command writes", () => {
+	it("judges a command on the paths it writes, not on what it reads", async () => {
+		const { pi } = enforce();
+		await pi.user("Read-only for now, just investigate.");
+		assert.equal(await blocked(pi, "bash", { command: "mkdir -p /tmp/probe && cp src/a.ts /tmp/probe/" }), false);
+		assert.equal(await blocked(pi, "bash", { command: "cp src/a.ts src/b.ts" }), true);
+	});
+
+	it("reading test/ into another file is not modifying test/; writing into it is", async () => {
+		const { pi } = enforce();
+		await pi.user("Don't modify anything in test/.");
+		assert.equal(await blocked(pi, "bash", { command: "grep -rn foo test/ > notes.txt" }), false);
+		assert.equal(await blocked(pi, "bash", { command: "cp test/fixture.json /tmp/fixture.json" }), false);
+		for (const command of ["echo x > test/a.test.ts", "cd test && rm a.test.ts", "find test -name '*.snap' -delete", "mv test/a.test.ts /tmp/", "git checkout test/a.test.ts"]) {
+			assert.equal(await blocked(pi, "bash", { command }), true, command);
+		}
+	});
+
+	it("echo/printf text is not an operation, unless a shell runs it", async () => {
+		const { pi } = enforce();
+		await pi.user("Don't push.");
+		assert.equal(await blocked(pi, "bash", { command: "echo remember to git push later" }), false);
+		for (const command of ["echo 'git push' | sh", "bash -c 'git push'", "ssh host 'cd app && git push'", "git commit -am x && git push"]) {
+			assert.equal(await blocked(pi, "bash", { command }), true, command);
+		}
+	});
+});

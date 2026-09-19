@@ -95,6 +95,32 @@ export const RULE_OR_GUIDANCE = {
 	},
 } as const;
 
+// The parser sees "don't push" in "explain why people say never push" and in "write a hook that blocks pushes".
+// This asks whether the sentence restricts the assistant at all (E16).
+export const DIRECTIVE = {
+	type: "choice",
+	instructions: {
+		question: "Does `new_user_message` restrict what the assistant itself may do?",
+		focus: "Who the restriction is for. A restriction on the code, docs or hooks the assistant is asked to write, or on other people, is not a restriction on the assistant.",
+	},
+	criteria: {
+		restricts_assistant: {
+			what: "The user tells the assistant not to do this (or to ask first), now or for the rest of the session",
+			examples: ["Why is it failing? Don't change the tests though.", "先别提交，我要先看一下。"],
+		},
+		not_a_rule: {
+			what: "No such restriction on the assistant: the message explains or asks about a rule, quotes someone else's rule, describes existing code, specifies behaviour of code or text to write, or gives permission or reassurance",
+			not_for: "A real restriction that comes with a question or a task in the same message",
+			examples: ["Explain why people say never force push.", "帮我写个 git hook，禁止直接 push 到 main。", "I don't mind if you edit the tests."],
+		},
+		unclear: "Cannot tell",
+	},
+} as const;
+
+export function directiveQuestion(rule: string): Question {
+	return { ...DIRECTIVE, instructions: { ...DIRECTIVE.instructions, question: `Does \`new_user_message\` restrict the assistant itself: ${rule}?` } } as unknown as Question;
+}
+
 export const THRESHOLDS = {
 	/** A delta choice must have this probability and confidence to be applied. */
 	delta: { p: 0.9, confidence: 0.8 },
@@ -108,6 +134,8 @@ export const THRESHOLDS = {
 	reject: 0.2,
 	/** P(design_guidance) and confidence to stop treating a sentence as an enforceable ban. */
 	guidance: { p: 0.9, confidence: 0.8 },
+	/** P(not_a_rule) and confidence to drop a parsed restriction. E16: not-rules ≥ 0.96, real rules ≤ 0.19. */
+	notARule: { p: 0.9, confidence: 0.8 },
 };
 
 export interface Understanding {
@@ -179,15 +207,19 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 	};
 	// The go-ahead question gets its own request with a minimal state: sharing the full state (the policy list)
 	// cut it from 8/9 to 5/9 lifts caught, with no false lifts either way (E12). The two run in parallel.
-	const [main, goRequest] = await Promise.all([
+	// Restrictions the parser just added: does the message restrict the assistant at all? Own request, message only (E16).
+	const parsed = input.createdByRules.filter((p) => p.effect !== "ALLOW");
+	const directiveQs = Object.fromEntries(parsed.map((p) => [`dir_${p.id}`, directiveQuestion(describe(p))]));
+	const [main, goRequest, dirRequest] = await Promise.all([
 		ask(judge, state, questions, timeoutMs),
 		readOnly.length
 			? ask(judge, { new_user_message: truncate(input.message, 3000), earlier_policy: truncate(readOnly.at(-1)!.sourceQuote, 300) }, { go_ahead: GO_AHEAD }, timeoutMs)
 			: Promise.resolve(undefined),
+		parsed.length ? ask(judge, { new_user_message: truncate(input.message, 3000) }, directiveQs, timeoutMs) : Promise.resolve(undefined),
 	]);
 	const { error, ms } = main;
 	if (!main.answers) return { ...empty, ms, error };
-	const answers = { ...main.answers, ...(goRequest?.answers ?? {}) };
+	const answers = { ...main.answers, ...(goRequest?.answers ?? {}), ...(dirRequest?.answers ?? {}) };
 
 	const out: Understanding = { ...empty, ms };
 	const choiceP = (k: string, option: string) => {
@@ -259,7 +291,16 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 		for (const p of input.createdByRules) if (p.effect === "ALLOW" && p.scope === "session") out.ops.push({ op: "rescope", id: p.id, scope: "once", by: "jev" });
 	}
 	if ((noul("new_task") ?? 0) >= THRESHOLDS.newTask) out.ops.unshift({ op: "end", scope: "goal", before: input.at });
-	for (const p of input.createdByRules.filter((c) => c.action === "custom")) {
+	const notRules = new Set<string>();
+	for (const p of parsed) {
+		const d = choiceP(`dir_${p.id}`, "not_a_rule");
+		if (d) out.signals[`not_a_rule_${p.id}`] = d.p;
+		if (d && d.p >= THRESHOLDS.notARule.p && d.confidence >= THRESHOLDS.notARule.confidence) {
+			notRules.add(p.id);
+			out.ops.push({ op: "supersede", id: p.id, reason: `not a restriction on the assistant (jev p=${d.p.toFixed(2)})`, by: "jev" });
+		}
+	}
+	for (const p of input.createdByRules.filter((c) => c.action === "custom" && !notRules.has(c.id))) {
 		const v = noul(`real_${p.id}`);
 		const g = choiceP(`kind_${p.id}`, "design_guidance");
 		if (g) out.signals[`guidance_${p.id}`] = g.p;
