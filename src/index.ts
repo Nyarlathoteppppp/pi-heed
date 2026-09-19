@@ -62,6 +62,19 @@ interface Decision {
 }
 
 const MODES: Mode[] = ["off", "shadow", "enforce"];
+const MODE_HELP: Record<Mode, string> = { off: "do nothing", shadow: "decide and log, never block", enforce: "block calls that break your rules" };
+const SUBCOMMANDS: Record<string, string> = {
+	status: "mode, Jev, active rules, budget",
+	policies: "the rules in force right now",
+	history: "lifted and expired rules, and why",
+	explain: "<id>: which of your sentences a rule came from",
+	mode: "off | shadow | enforce",
+	review: "[n]: recent decisions, numbered",
+	label: "[n] good|bad: mark a decision right or wrong",
+	add: "<text>: add a rule by hand",
+	drop: "<id> | all: remove a rule",
+	log: "[n]: raw decision log",
+};
 const MEMO_LIMIT = 200;
 /** Tools whose path argument streams before a (possibly long) body. */
 const PATH_FIRST_TOOLS = new Set(["edit", "write"]);
@@ -140,7 +153,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		if (!ctx.hasUI) return;
 		if (config.mode === "off") return ctx.ui.setStatus("heed", undefined);
 		const n = engine.active().length;
-		ctx.ui.setStatus("heed", `heed:${config.mode}${n ? ` ${n}p` : ""}${extra ? ` · ${extra}` : ""}`);
+		ctx.ui.setStatus("heed", `heed:${config.mode}${n ? ` ${n}p` : ""}${judge ? "" : " · no Jev"}${extra ? ` · ${extra}` : ""}`);
 	};
 
 	const canIntervene = () => config.mode === "enforce" && interventions < config.maxInterventionsPerRun;
@@ -536,11 +549,17 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		`${p.id} ${describe(p)}${p.exceptions.length ? ` except ${p.exceptions.join(",")}` : ""}  ← ${p.provenance.by} #${p.provenance.at}: "${truncate(p.sourceQuote, 80)}"`;
 
 	pi.registerCommand("heed", {
-		description:
-			"pi-heed: status | policies | history | explain <id> | mode <off|shadow|enforce> | add <text> | drop <id> | log [n] | review [n] | label [n] <good|bad> [note]",
+		// Kept short: command menus (pi-web) truncate long descriptions. Each subcommand explains itself below.
+		description: "pi-heed: rules you set in this chat",
 		getArgumentCompletions: (prefix) => {
-			const subs = ["status", "policies", "history", "explain", "mode", "add", "drop", "log", "review", "label"];
-			return subs.filter((s) => s.startsWith(prefix)).map((s) => ({ value: s, label: s }));
+			const [sub, ...rest] = prefix.split(/\s+/);
+			if (rest.length && sub === "mode") {
+				return MODES.filter((m) => m.startsWith(rest.join(" "))).map((m) => ({ value: `mode ${m}`, label: m, description: MODE_HELP[m] }));
+			}
+			if (rest.length) return null;
+			return Object.entries(SUBCOMMANDS)
+				.filter(([name]) => name.startsWith(sub ?? ""))
+				.map(([name, description]) => ({ value: name, label: name, description }));
 		},
 		handler: async (args, ctx) => {
 			const [sub = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
@@ -550,7 +569,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 				case "status":
 					return say(
 						[
-							`mode: ${config.mode}   judge: ${judge?.name ?? "none (rules only)"}   interventions this run: ${interventions}/${config.maxInterventionsPerRun}`,
+							`mode: ${config.mode}   judge: ${judge?.name ?? "none (rules only): set envFile in ~/.pi/agent/pi-heed.json"}   interventions this run: ${interventions}/${config.maxInterventionsPerRun}`,
 							...engine.active().map((p) => `  ${line(p)}`),
 						].join("\n"),
 					);
@@ -594,7 +613,12 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 					return say(lines.length ? lines.join("\n") : "already active");
 				}
 				case "drop": {
-					const lines = commit({ kind: "command", at: userMessages.length, ops: [{ op: "supersede", id: arg, reason: "dropped by /heed drop", by: "command" }] });
+					const ids = arg === "all" ? engine.active().map((p) => p.id) : [arg];
+					const lines = commit({
+						kind: "command",
+						at: userMessages.length,
+						ops: ids.map((id): PolicyOp => ({ op: "supersede", id, reason: arg === "all" ? "dropped by /heed drop all" : "dropped by /heed drop", by: "command" })),
+					});
 					status(ctx);
 					return say(lines.length ? lines.join("\n") : `no active policy ${arg}`, lines.length ? "info" : "warning");
 				}

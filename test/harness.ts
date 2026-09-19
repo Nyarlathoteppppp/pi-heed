@@ -21,7 +21,7 @@ type Handler = (event: any, ctx: any) => any;
 /** Minimal stand-in for pi's ExtensionAPI: sequential awaited handlers, like agent-core. */
 export class FakePi {
 	handlers = new Map<string, Handler[]>();
-	commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> }>();
+	commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void>; description?: string; getArgumentCompletions?: (p: string) => unknown }>();
 	entries: Array<Record<string, any>> = [];
 	turnTriggers: string[] = [];
 	status: string | undefined;

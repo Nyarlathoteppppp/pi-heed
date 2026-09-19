@@ -478,3 +478,23 @@ describe("v0.7: inform, speed bump, review", () => {
 		assert.match(pi.notes.at(-1)!, / 2\. BLOCKED\s+edit a\.ts.*\(bad\)/);
 	});
 });
+
+describe("commands: short menu entry, per-subcommand help, drop all", () => {
+	it("completions carry their own descriptions; mode completes its values", async () => {
+		const { pi } = setup({ judge: null });
+		const cmd = (pi as any).commands.get("heed");
+		assert.ok(cmd.description.length <= 40);
+		const all = await cmd.getArgumentCompletions("");
+		assert.ok(all.every((c: any) => c.description));
+		assert.deepEqual((await cmd.getArgumentCompletions("mode e")).map((c: any) => c.value), ["mode enforce"]);
+	});
+
+	it("/heed drop all clears every active rule, keeping history", async () => {
+		const { pi, heed } = enforce();
+		await pi.user("Don't modify any files. No new dependencies. Don't push.");
+		assert.equal(heed.engine.active().length, 3);
+		await pi.command("/heed drop all");
+		assert.equal(heed.engine.active().length, 0);
+		assert.equal(heed.engine.history().length, 3);
+	});
+});

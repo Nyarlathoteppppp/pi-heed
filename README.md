@@ -8,7 +8,7 @@ Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effect
 
 [![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1-7c5cff)](https://pi.dev)
 [![Jev](https://img.shields.io/badge/powered%20by-TypeSafe%20Jev-f5a524)](https://docs.typesafe.ai)
-[![tests](https://img.shields.io/badge/tests-122%20passing-2ea043)](#development)
+[![tests](https://img.shields.io/badge/tests-124%20passing-2ea043)](#development)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
@@ -192,7 +192,7 @@ key was found.
 /heed explain <id>               which of your sentences a policy came from, its exceptions
 /heed mode <off|shadow|enforce>
 /heed add <text>                 add a free-text prohibition by hand
-/heed drop <id>
+/heed drop <id>        # or: /heed drop all
 /heed log [n]                    recent decisions (with pre-judge / wait times)
 /heed review [n]                 recent decisions, numbered
 /heed label [n] <good|bad> [note]  label decision n from /heed review (default: the latest)
