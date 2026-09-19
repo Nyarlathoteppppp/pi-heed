@@ -4,3 +4,4 @@ node_modules/
 .env
 bench/.baseline/
 bench/results.*.json
+bench/.v052/

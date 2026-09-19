@@ -151,3 +151,20 @@ describe("rules: 别 is not always a prohibition (real session)", () => {
 		assert.deepEqual(kindsOfText("别改 package.json"), ["protect_path"]);
 	});
 });
+
+describe("interpreter-aware shell classification (real session)", () => {
+	const cases: Array<[string, boolean]> = [
+		[`ssh qqbot-server 'python3 - <<"PY"\nimport json\nprint(json.dumps({"a": 1}))\nPY'`, false],
+		[`python3 - <<'PY'\nimport os, json\nif x > 3: print(x)\nPY`, false],
+		[`node -e "console.log(1 > 0)"`, false],
+		[`python3 -c "print(2 > 1)"`, false],
+		[`python3 - <<'PY'\nopen('out.txt', 'w').write('x')\nPY`, true],
+		[`node -e "require('fs').writeFileSync('a.txt','x')"`, true],
+		[`python3 -c "import shutil; shutil.rmtree('build')"`, true],
+		[`python3 - <<'PY'\nimport requests\nrequests.post('https://x', json={})\nPY`, true],
+		[`python3 script.py > out.txt`, true],
+		[`bash -c "echo x > f.txt"`, true],
+		[`ssh host 'rm -rf /srv/app'`, true],
+	];
+	for (const [command, mutates] of cases) it(command.replace(/\n/g, "⏎").slice(0, 60), () => assert.equal(classify("bash", { command }).mutates, mutates));
+});

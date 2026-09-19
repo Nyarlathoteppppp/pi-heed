@@ -1,6 +1,6 @@
 # pi-heed benchmark
 
-49 scripted sessions, 197 labelled tool-call decisions. Each case is a sequence of user messages, text from other
+55 scripted sessions, 208 labelled tool-call decisions. Each case is a sequence of user messages, text from other
 extensions, tool output, context compactions and tool calls. Every call is labelled with what a careful human would
 do given only what the **user** said.
 
@@ -10,6 +10,7 @@ do given only what the **user** said.
 | B. lifecycle | 22 | full lift, single-file and later exceptions, once / run scopes, narrow and nested, re-apply, lift one of several, fuzzy lift / prohibition, "don't forget" false positives, ask-before, tests-before-push, revoke, newer-wins conflicts |
 | C. long sessions | 8 | constraint stated early then 20–60 calls later, compaction (a fresh pi-heed rebuilt from the session only), a used once-permission and an expired run permission staying dead after compaction |
 | D. adversarial | 7 | "do not edit" inside files, extension-injected text, quoted and reported speech, pasted logs, instructions inside tool output |
+| E. real sessions | 6 | taken from the author's own sessions: scratch file under read-only, 别人, design guidance, an implicit lift by assigning work, a comparison inside inline Python, an extension tool |
 
 ## Run
 
@@ -41,7 +42,10 @@ Jev: `~typesafe/jev-latest` via OpenRouter (resolved to `typesafe/jev-1.13-20260
 | **v0.4.0 – v0.5.1, rules** | **90.5%** | **1.3%** | **93.2%** | **87.8%** | 4.1% | 8.2% | 0 | $0 | 0 / 0 ms |
 | v0.4.0 + Jev | 95.2% | 0.6% | 95.5% | 93.9% | 2.0% | 4.1% | 2.51 | $0.000049 | 0 / 340 ms |
 | v0.5.0 + Jev | 97.6% | 0.0% | 100% | 98.0% | 0.0% | 2.0% | 2.53 | $0.000057 | 0 / 388 ms |
-| **v0.5.1 + Jev** | **97.6%** | **0.0%** | **100%** | **98.0%** | **0.0%** | **2.0%** | **1.71** | **$0.000038** | **0 / 313 ms** |
+| v0.5.1 + Jev | 97.6% | 0.0% | 100% | 98.0% | 0.0% | 2.0% | 1.71 | $0.000038 | 0 / 313 ms |
+| *55 sessions from here (E added)* | | | | | | | | | |
+| v0.5.2 + Jev | 95.7% | 1.9% | 100% | 92.7% | 5.5% | 3.6% | 1.73 | $0.000039 | 0 / 245 ms |
+| **v0.6.0 + Jev** | **97.8%** | **0.0%** | **100%** | **98.2%** | **0.0%** | **1.8%** | 1.80 | $0.000040 | 0 / 257 ms |
 
 - **recall**: share of calls that should be blocked that were blocked (42). **false block**: share of calls that should run that were blocked (155).
 - **Latency** is the time `tool_call` waits on pi-heed, with Jev answers replayed at their recorded latency (Jev call p50 321 ms, p95 540 ms, max 1636 ms). The runner does not simulate streaming, so pre-judging during streaming gets no head start: these are upper bounds.

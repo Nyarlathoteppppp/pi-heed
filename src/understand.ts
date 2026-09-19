@@ -75,6 +75,26 @@ export const GO_AHEAD: Question = {
 	},
 };
 
+// A "don't …" sentence can be a rule about an operation a tool call performs ("never push", "don't touch .env")
+// or guidance about how to write the code ("don't over-engineer", "不要为了架构漂亮重写"). Only the first can be
+// enforced at a tool call. Probe on real-session sentences: 18/18 separated, 8/9 guidance confidently (E11).
+export const RULE_OR_GUIDANCE = {
+	type: "choice",
+	instructions: {
+		question: "What kind of instruction is `sentence`?",
+		focus: "Whether a single tool call (a file write, a shell command, a network request, a git operation) could break it on its own.",
+	},
+	criteria: {
+		action_rule: { what: "Forbids a concrete operation that one tool call could perform", examples: ["Don't drop the users table.", "不要删除 logs 目录"] },
+		design_guidance: {
+			what: "Guidance about how to design or write the code; judging it needs the code's content, not the operation",
+			not_for: "A ban on a specific file, command, service or data",
+			examples: ["Prefer small functions.", "不要写得太复杂"],
+		},
+		unclear: "Cannot tell",
+	},
+} as const;
+
 export const THRESHOLDS = {
 	/** A delta choice must have this probability and confidence to be applied. */
 	delta: { p: 0.9, confidence: 0.8 },
@@ -86,6 +106,8 @@ export const THRESHOLDS = {
 	newTask: 0.8,
 	/** A rule-made custom prohibition below this is not a real prohibition. */
 	reject: 0.2,
+	/** P(design_guidance) and confidence to stop treating a sentence as an enforceable ban. */
+	guidance: { p: 0.9, confidence: 0.8 },
 };
 
 export interface Understanding {
@@ -133,7 +155,6 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 		}
 	}
 	const readOnly = existing.filter((p) => p.effect === "DENY" && p.action === "modify" && p.resource === "*");
-	if (readOnly.length) questions.go_ahead = GO_AHEAD;
 	questions.new_prohibition = { type: "noul", instructions: "new_user_message forbids the assistant from doing something." };
 	questions.new_permission = { type: "noul", instructions: "new_user_message gives the assistant permission to do something it was not allowed to do." };
 	if (input.createdByRules.some((p) => p.effect === "ALLOW" && p.scope === "session")) {
@@ -141,6 +162,11 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 	}
 	if (input.hasGoalScoped) questions.new_task = { type: "noul", instructions: "new_user_message starts a new, unrelated task instead of continuing the current one." };
 	for (const p of input.createdByRules.filter((c) => c.action === "custom")) {
+		// each question sees the whole state; the sentence it is about goes in its instructions
+		questions[`kind_${p.id}`] = {
+			...RULE_OR_GUIDANCE,
+			instructions: { ...RULE_OR_GUIDANCE.instructions, question: `What kind of instruction is this sentence: "${truncate(p.resource, 200)}"?` },
+		} as unknown as Question;
 		questions[`real_${p.id}`] = {
 			type: "noul",
 			instructions: `The sentence "${truncate(p.resource, 200)}" forbids the assistant from taking some action (a real prohibition, not advice like "don't forget" or reassurance like "don't worry").`,
@@ -151,8 +177,17 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 		new_user_message: truncate(input.message, 3000),
 		policies_before_message: existing.map((p) => ({ id: p.id, said: truncate(p.sourceQuote, 200), rule: describe(p) })),
 	};
-	const { answers, error, ms } = await ask(judge, state, questions, timeoutMs);
-	if (!answers) return { ...empty, ms, error };
+	// The go-ahead question gets its own request with a minimal state: sharing the full state (the policy list)
+	// cut it from 8/9 to 5/9 lifts caught, with no false lifts either way (E12). The two run in parallel.
+	const [main, goRequest] = await Promise.all([
+		ask(judge, state, questions, timeoutMs),
+		readOnly.length
+			? ask(judge, { new_user_message: truncate(input.message, 3000), earlier_policy: truncate(readOnly.at(-1)!.sourceQuote, 300) }, { go_ahead: GO_AHEAD }, timeoutMs)
+			: Promise.resolve(undefined),
+	]);
+	const { error, ms } = main;
+	if (!main.answers) return { ...empty, ms, error };
+	const answers = { ...main.answers, ...(goRequest?.answers ?? {}) };
 
 	const out: Understanding = { ...empty, ms };
 	const choiceP = (k: string, option: string) => {
@@ -226,7 +261,13 @@ export async function understand(judge: Judge | undefined, input: UnderstandInpu
 	if ((noul("new_task") ?? 0) >= THRESHOLDS.newTask) out.ops.unshift({ op: "end", scope: "goal", before: input.at });
 	for (const p of input.createdByRules.filter((c) => c.action === "custom")) {
 		const v = noul(`real_${p.id}`);
-		if (v !== undefined && v < THRESHOLDS.reject) out.ops.push({ op: "supersede", id: p.id, reason: `not a prohibition (jev p=${v.toFixed(2)})`, by: "jev" });
+		const g = choiceP(`kind_${p.id}`, "design_guidance");
+		if (g) out.signals[`guidance_${p.id}`] = g.p;
+		if (v !== undefined && v < THRESHOLDS.reject) {
+			out.ops.push({ op: "supersede", id: p.id, reason: `not a prohibition (jev p=${v.toFixed(2)})`, by: "jev" });
+		} else if (g && g.p >= THRESHOLDS.guidance.p && g.confidence >= THRESHOLDS.guidance.confidence) {
+			out.ops.push({ op: "supersede", id: p.id, reason: `design guidance, not enforceable on a tool call (jev p=${g.p.toFixed(2)})`, by: "jev" });
+		}
 	}
 	return out;
 }

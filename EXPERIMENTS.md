@@ -21,6 +21,7 @@ decided and commit the script, so someone else can rerun it.
 | [E09](#e09--typesafes-authoring-guidelines-structured-questions) | Do TypeSafe's authoring guidelines help? | For 3 of 8 judgements (read-only, push, tool relevance); prose stays for the rest. Jev-decided calls 52 → 12 |
 | [E10](#e10--does-it-matter-with-a-real-model) | Does it matter with a real model? | Simple constraints: the model keeps them itself (0/15 either way). Constraint changed mid-session: model broke it 3/3, pi-heed stopped 3/3, 0 false blocks |
 | [E11](#e11--what-real-sessions-show) | What do the author's real sessions show? | Implicit lifts, scratch files, design guidance mistaken for bans, a 别人 parsing bug, heredoc `>` misread. Sets the v0.6 agenda |
+| [E12](#e12--v06-real-session-fixes-and-a-shared-state-trap) | v0.6: fixing E11, and a shared-state trap | Real-session cases 3/6 → 6/6, false block 0.0%; one question needed its own request, because a shared state cost it 3 of 9 lifts |
 
 ---
 
@@ -296,3 +297,43 @@ under v0.3 with no Jev key. Each finding was then re-checked against the current
 
 **Decision.** These set the v0.6 agenda. Real sessions surfaced six issues the 49 scripted cases missed, so real
 logs (`/heed log`, `/heed label`) feed the benchmark from now on.
+
+## E12 · v0.6: real-session fixes, and a shared-state trap
+
+**Question.** Do the E11 fixes work, without regressions? Six real-session cases were added to the scripted
+benchmark as category E: a scratch file under read-only, 别人, design guidance, an implicit lift, a comparison inside
+inline Python, and an extension tool.
+
+**Changes.** Rules only: blanket policies ignore temp files outside the project (the working directory always
+wins, since projects can live in /tmp); inline interpreter code is judged by what it calls (`open(…, 'w')`,
+`fs.writeFileSync`, `subprocess`, `requests.post`…) rather than by `>`; 别 before 人/的/处, or inside 区别 / 特别 …,
+is not a ban. With Jev: design guidance is superseded instead of enforced (E11's `action_rule / design_guidance /
+unclear` question), and tool relevance covers pi's active extension tools, using their own descriptions.
+
+**Trap found on the way.** The go-ahead question scored 0.98 on the real-session lift when probed alone, but 0.81
+inside pi-heed. Same question; the difference was the state. In pi-heed it shares one request, and therefore one
+state, with the policy-delta questions, and that state carries a policy list with internal descriptions
+(`DENY modify anything (session)`). A/B on 19 messages:
+
+| state for the go-ahead question | lifts caught (of 9) | false lifts |
+|---|---|---|
+| shared state with the policy list (v0.5) | 5 | 0 |
+| shared state plus an `earlier_policy` field referenced by path | 4 | 0 |
+| **its own request: `new_user_message` + `earlier_policy` only** | **8** | 0 |
+
+This refines E01. Asking many questions in one request costs no latency, but they all read the same state. A
+question that other context distracts should get its own request, in parallel. That follows TypeSafe's "decompose
+the input state".
+
+**Result** (scripted benchmark, now 55 sessions, 208 decisions, fresh recording, replay-verified):
+
+| | recall | false block | lifecycle | task success | real-session (E) | deterministic errors |
+|---|---|---|---|---|---|---|
+| v0.5.2 + Jev | 95.7% | 1.9% | 100% | 92.7% | 3/6 | 3 |
+| **v0.6.0 + Jev** | **97.8%** | **0.0%** | 100% | **98.2%** | **6/6** | **0** |
+
+Only A12 remains ("don't send notifications" vs a Slack webhook `curl`, Jev 0.76–0.88 across recordings, below
+the 0.9 block threshold): a miss by design, never a false block.
+
+**Reproduce.** `node bench/run.ts --judge replay`; `node bench/run.ts --impl v052 --judge replay` after
+`mkdir -p bench/.v052 && git archive 194e81e src | tar -x -C bench/.v052`.

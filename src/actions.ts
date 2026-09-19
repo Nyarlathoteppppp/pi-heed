@@ -32,6 +32,35 @@ const GIT_PUSH = /\bgit\s+push\b/;
 const GIT_COMMIT = /\bgit\s+commit\b/;
 const RUNS_TESTS = /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|\b(?:pytest|jest|vitest|mocha|rspec|phpunit)\b|\bgo\s+test\b|\bcargo\s+test\b|\bmake\s+test\b|\bnode\s+--test\b|\bpython3?\s+-m\s+(?:pytest|unittest)\b/;
 
+const INTERPRETER = String.raw`\b(?:python3?|node|ruby|perl|bun|deno)\b`;
+// Code handed to an interpreter inline: a heredoc body, or the string after -c / -e / -p.
+const HEREDOC = new RegExp(String.raw`(${INTERPRETER}[^\n]*?)<<-?\s*(['"]?)(\w+)\2[^\n]*\n([\s\S]*?)\n[ \t]*\3(?=\s|'|"|$)`, "g");
+const INLINE = new RegExp(String.raw`(${INTERPRETER}(?:\s+-[A-Za-z]+)*?\s+-[cep]\s+)(['"])([\s\S]*?)(?<!\\)\2`, "g");
+// Side effects inside interpreter code. Comparisons like "x > 3" are not redirects.
+const CODE_WRITES: RegExp[] = [
+	/\bopen\s*\([^)]*,\s*(?:mode\s*=\s*)?['"][^'"]*[wax+][^'"]*['"]/,
+	/\.(?:write_text|write_bytes|unlink|rmdir|mkdir|rename|replace|touch)\s*\(/,
+	/\b(?:os\.(?:remove|unlink|rmdir|removedirs|rename|replace|makedirs|mkdir|system|popen)|shutil\.\w+|subprocess\.\w+)\s*\(/,
+	/\b(?:fs|fsp|fs\.promises)\.(?:writeFile|appendFile|unlink|rm|rmdir|mkdir|rename|copyFile|cp)(?:Sync)?\s*\(/,
+	/\b(?:writeFileSync|appendFileSync|unlinkSync|rmSync|mkdirSync|renameSync|execSync|spawnSync|exec|spawn)\s*\(/,
+	/\bFile\.(?:write|delete|rename)\b|\bFileUtils\./,
+	/\b(?:requests|httpx)\.(?:post|put|patch|delete)\s*\(|\bfetch\s*\([^)]*method\s*:\s*['"](?:POST|PUT|PATCH|DELETE)/i,
+];
+
+/** Separates inline interpreter code from the surrounding shell so each is judged by its own rules. */
+export function splitInterpreterCode(command: string): { shell: string; code: string[] } {
+	const code: string[] = [];
+	let shell = command.replace(HEREDOC, (_m, head: string, _q: string, _tag: string, body: string) => {
+		code.push(body);
+		return `${head}<<CODE `;
+	});
+	shell = shell.replace(INLINE, (_m, head: string, _q: string, body: string) => {
+		code.push(body);
+		return `${head}CODE`;
+	});
+	return { shell, code };
+}
+
 function str(v: unknown): string | undefined {
 	return typeof v === "string" ? v : undefined;
 }
@@ -47,7 +76,8 @@ export function classify(toolName: string, input: Record<string, unknown>): Tool
 	}
 	if (toolName === "bash") {
 		const command = str(input.command) ?? "";
-		const mutates = MUTATING_BASH.some((re) => re.test(command));
+		const { shell, code } = splitInterpreterCode(command);
+		const mutates = MUTATING_BASH.some((re) => re.test(shell)) || code.some((c) => CODE_WRITES.some((re) => re.test(c)));
 		const installsDeps = DEP_INSTALL.some((re) => re.test(command));
 		return {
 			toolName,

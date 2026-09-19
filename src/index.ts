@@ -99,6 +99,8 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	let interventions = 0;
 	/** Change-epoch at which the tests last passed; REQUIRE_BEFORE("tests") holds while nothing changed since. */
 	let testsOkEpoch = -1;
+	/** pi's working directory: blanket policies cover the project, not scratch files elsewhere. */
+	let cwd: string | undefined;
 
 	const log = (r: Omit<HeedLogRecord, "mode" | "run">) => pi.appendEntry<HeedLogRecord>("heed", { ...r, mode: config.mode, run });
 
@@ -196,7 +198,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 
 	/** Full gate decision: resolved policy state first, then Jev for free-text prohibitions. */
 	async function decide(action: ToolAction, input: Record<string, unknown>, signal?: AbortSignal): Promise<Decision> {
-		const r = engine.resolve(action, satisfied);
+		const r = engine.resolve(action, satisfied, cwd);
 		if (r.policy) return restrictiveDecision(r, action, signal);
 		const custom = await relevantCustom(engine.customDenies(), action.toolName);
 		if (custom.length === 0) return { ms: 0 };
@@ -213,18 +215,37 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		return hit;
 	}
 
+	/**
+	 * Tools a free-text policy is checked against for relevance: the built-ins plus the extension tools pi has
+	 * active, described by their own descriptions. Read-only built-ins never reach the check anyway.
+	 */
+	function toolCatalog(): Record<string, string> {
+		const catalog: Record<string, string> = { ...RELEVANCE_TOOLS };
+		try {
+			const active = new Set(pi.getActiveTools());
+			for (const t of pi.getAllTools()) {
+				if (!active.has(t.name) || t.name in catalog || ["read", "grep", "find", "ls"].includes(t.name)) continue;
+				if (Object.keys(catalog).length >= 40) break;
+				catalog[t.name] = `${t.name}: ${truncate(String(t.description ?? "").replace(/\s+/g, " "), 200)}`;
+			}
+		} catch {
+			// tool listing unavailable: built-ins only
+		}
+		return catalog;
+	}
+
 	function relevanceOf(p: Policy): Promise<Record<string, boolean>> {
 		let r = relevance.get(p.id);
 		if (!r) {
-			r = toolRelevance(judge, p, config.judgeTimeoutMs);
+			r = toolRelevance(judge, p, config.judgeTimeoutMs, toolCatalog());
 			relevance.set(p.id, r);
 		}
 		return r;
 	}
 
-	/** Free-text policies that this tool could break. Unknown tools and unanswered questions keep every policy. */
+	/** Free-text policies that this tool could break. Tools not in the catalog and unanswered questions keep every policy. */
 	async function relevantCustom(custom: Policy[], tool: string): Promise<Policy[]> {
-		if (!judge || !(tool in RELEVANCE_TOOLS) || custom.length === 0) return custom;
+		if (!judge || custom.length === 0) return custom;
 		const cannot = await Promise.all(custom.map((p) => settle(relevanceOf(p), config.judgeTimeoutMs)));
 		return custom.filter((_, i) => !cannot[i]?.[tool]);
 	}
@@ -268,6 +289,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	}
 
 	pi.on("session_start", (_e, ctx) => {
+		cwd = ctx.cwd;
 		rebuild(ctx);
 		// Pay DNS + TLS now rather than on the first real decision (measured: 746 ms cold vs ~270 ms warm).
 		if (config.mode !== "off") judge?.warm?.();
@@ -337,6 +359,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	pi.on("message_update", (event, ctx) => {
 		const e = event.assistantMessageEvent;
 		if (config.mode === "off") return;
+		cwd = ctx.cwd ?? cwd;
 		if (e.type === "toolcall_delta") {
 			const tc = e.partial.content[e.contentIndex];
 			if (tc?.type !== "toolCall" || !PATH_FIRST_TOOLS.has(tc.name) || speculative.has(tc.id)) return;
@@ -345,7 +368,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 			if (typeof args.path !== "string" || !Object.keys(args).some((k) => k !== "path")) return;
 			const action = classify(tc.name, { path: args.path });
 			const early = settle(understanding, config.judgeTimeoutMs).then(() => {
-				const r = engine.resolve(action, satisfied);
+				const r = engine.resolve(action, satisfied, cwd);
 				return r.policy ? restrictiveDecision(r, action, ctx.signal) : undefined;
 			});
 			early.catch(() => {});
@@ -367,6 +390,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		if (config.mode === "off") return;
+		cwd = ctx.cwd ?? cwd;
 		const input = event.input as Record<string, unknown>;
 		const action = classify(event.toolName, input);
 		pending.set(event.toolCallId, action);
@@ -384,7 +408,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 			if (!prejudged) await settle(understanding, config.judgeTimeoutMs);
 			// Policy state may have moved since the pre-judgement (a once-permission used by an earlier call):
 			// resolution is µs, so always recheck it and only reuse Jev's work for the same deciding policy.
-			const fresh = engine.resolve(action, satisfied);
+			const fresh = engine.resolve(action, satisfied, cwd);
 			if (d && d.policyId !== fresh.policy?.id) d = undefined;
 			d ??= await decide(action, input, ctx.signal);
 			return { d, allowIds: fresh.allowIds };

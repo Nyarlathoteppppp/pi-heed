@@ -24,7 +24,7 @@ const flag = (name: string) => process.argv.includes(`--${name}`);
 
 const judgeMode = arg("judge", "none") as "none" | "replay" | "record" | "live";
 const impl = arg("impl", "current") as "current" | "baseline";
-const cassettePath = join(here, impl === "baseline" ? "cassette.baseline.json" : "cassette.json");
+const cassettePath = join(here, impl === "current" ? "cassette.json" : `cassette.${impl}.json`);
 const realtime = flag("realtime");
 
 type Cassette = Record<string, { status: number; body: string; ms: number }>;
@@ -76,7 +76,8 @@ function makeJudge(): Judge | null {
 	return new JevJudge(t, cassetteFetch());
 }
 
-const { createHeed } = (await import(impl === "baseline" ? "./.baseline/src/index.ts" : "../src/index.ts")) as typeof import("../src/index.ts");
+const implPath = impl === "baseline" ? "./.baseline/src/index.ts" : impl === "current" ? "../src/index.ts" : `./.${impl}/src/index.ts`;
+const { createHeed } = (await import(implPath)) as typeof import("../src/index.ts");
 
 interface Decision {
 	case: string;
@@ -95,6 +96,7 @@ const traces = new Map<string, string[]>();
 async function runCase(c: Case, judge: Judge | null): Promise<Decision[]> {
 	const config = { mode: "enforce" as const, maxInterventionsPerRun: 1000, judgeTimeoutMs: 5000 };
 	let pi = new FakePi();
+	pi.tools = c.tools ?? [];
 	let heed = createHeed(pi.api(), { judge, config, env: {} });
 	await pi.emit("session_start", { reason: "startup" });
 	const out: Decision[] = [];
@@ -138,6 +140,7 @@ async function runCase(c: Case, judge: Judge | null): Promise<Decision[]> {
 			const entries = pi.entries;
 			pi = new FakePi();
 			pi.entries = entries;
+			pi.tools = c.tools ?? [];
 			heed = createHeed(pi.api(), { judge, config, env: {} });
 			await pi.emit("session_start", { reason: "resume" });
 		} else {
@@ -206,7 +209,7 @@ const metrics = {
 	costPerTaskUsd: meter.cost / CASES.length,
 	cassetteMisses: meter.misses,
 	byCategory: Object.fromEntries(
-		(["A", "B", "C", "D"] as const).map((cat) => {
+		(["A", "B", "C", "D", "E"] as const).map((cat) => {
 			const ds = all.filter((d) => d.cat === cat);
 			return [cat, { decisions: ds.length, correct: ds.filter((d) => d.got === d.expect).length, tasks: perCase.filter((c) => c.cat === cat).length, tasksOk: perCase.filter((c) => c.cat === cat && c.ok).length }];
 		}),

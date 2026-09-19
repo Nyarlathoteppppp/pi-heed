@@ -352,3 +352,66 @@ describe("session rebuild", () => {
 		assert.deepEqual(kinds(again.heed.engine).sort(), ["no_tests", "read_only"]);
 	});
 });
+
+describe("v0.6: real-session fixes", () => {
+	it("scratch files outside the project don't count against read-only", async () => {
+		const { pi } = enforce();
+		pi.cwd = "/work/project";
+		await pi.user("进去看看，只读");
+		assert.equal(await blocked(pi, "write", { path: "/tmp/qqbot_jev_duplicate.py", content: "x" }), false);
+		assert.equal(await blocked(pi, "write", { path: "/private/var/folders/ab/T/probe.js", content: "x" }), false);
+		assert.equal(await edit(pi, "src/app.ts"), true);
+		assert.equal(await edit(pi, "/work/project/src/app.ts"), true);
+	});
+
+	it("…but a project that itself lives in /tmp is still the project", async () => {
+		const { pi } = enforce();
+		pi.cwd = "/private/tmp/sandbox/repo";
+		await pi.user("Don't modify any files.");
+		assert.equal(await edit(pi, "/private/tmp/sandbox/repo/src/strings.js"), true);
+		assert.equal(await blocked(pi, "write", { path: "/private/tmp/other/scratch.js", content: "x" }), false);
+	});
+
+	it("an explicit path policy still covers a temp path", async () => {
+		const { pi } = enforce();
+		await pi.user("Don't touch /tmp/shared/state.json");
+		assert.equal(await blocked(pi, "write", { path: "/tmp/shared/state.json", content: "x" }), true);
+	});
+
+	it("design guidance is not kept as an enforceable ban", async () => {
+		const guidance: Answer = { type: "choice", choice: "design_guidance", probabilities: { design_guidance: 0.97, action_rule: 0.02 }, confidence: 0.95 };
+		const rule: Answer = { type: "choice", choice: "action_rule", probabilities: { action_rule: 0.99 }, confidence: 0.98 };
+		const { pi, heed } = enforce(deltaJudge((k, q: any) => (k.startsWith("kind_") ? (JSON.stringify(q).includes("架构") ? guidance : rule) : k.startsWith("real_") ? { type: "noul", noul: 0.9 } : undefined)));
+		await pi.user("不要为了架构漂亮重写。Never call the production API.");
+		await heed.settled();
+		const custom = heed.engine.all().filter((p) => p.action === "custom");
+		assert.equal(custom.length, 2);
+		assert.equal(custom.find((p) => p.resource.includes("架构"))!.status, "superseded");
+		assert.match(custom.find((p) => p.resource.includes("架构"))!.provenance.endReason!, /design guidance/);
+		assert.equal(custom.find((p) => p.resource.includes("production"))!.status, "active");
+	});
+
+	it("extension tools a prohibition cannot concern skip the per-call check", async () => {
+		const asked: string[] = [];
+		const c = (x: string): Answer => ({ type: "choice", choice: x, probabilities: { [x]: 0.97 }, confidence: 0.95 });
+		const judge: Judge = {
+			name: "fake",
+			decide: async (_s, qs): Promise<Record<string, Answer>> => {
+				asked.push(Object.keys(qs).sort().join(","));
+				if ("todo" in qs) return { edit: c("cannot"), write: c("cannot"), bash: c("can_violate"), todo: c("cannot"), deploy: c("can_violate") };
+				if ("q" in qs) return { q: choice("violates", 0.97, 0.9) };
+				return {};
+			},
+		};
+		const { pi, heed } = enforce(judge);
+		pi.tools = [
+			{ name: "todo", description: "Create and update a task list" },
+			{ name: "deploy", description: "Deploy the service to an environment" },
+		];
+		await pi.user("Never call the production API.");
+		await heed.settled();
+		assert.equal(await blocked(pi, "todo", { action: "create", subject: "x" }), false);
+		assert.equal(await blocked(pi, "deploy", { env: "production" }), true);
+		assert.equal(asked.filter((k) => k === "q").length, 1); // only deploy was judged
+	});
+});

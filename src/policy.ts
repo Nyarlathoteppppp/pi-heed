@@ -96,6 +96,20 @@ export function resourceSpecificity(resource: string): number {
 	return 2 + segs.length + (isFile ? 50 : 0);
 }
 
+const TEMP_ROOTS = ["/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/"];
+
+/**
+ * A scratch file: an absolute path in a temp directory that is not inside the project. Blanket policies
+ * ("don't modify anything") are about the project; writing a throwaway script to /tmp is not modifying it.
+ * The project itself may live under /tmp, so the working directory always wins.
+ */
+export function isScratch(path: string, cwd?: string): boolean {
+	if (!path.startsWith("/")) return false;
+	const roots = [...TEMP_ROOTS, ...(process.env.TMPDIR ? [process.env.TMPDIR.replace(/\/?$/, "/")] : [])];
+	if (!roots.some((r) => path.startsWith(r))) return false;
+	return !(cwd && (path === cwd || path.startsWith(cwd.replace(/\/?$/, "/"))));
+}
+
 function actionSpecificity(a: PolicyAction): number {
 	return a === "modify" ? 0 : 1;
 }
@@ -202,12 +216,12 @@ export class PolicyEngine {
 	 * The deciding policy for a tool action. For each target path the most specific applicable policy
 	 * wins (resource, then action, then recency). Any restricted target restricts the whole call.
 	 */
-	resolve(action: ToolAction, satisfied: (p: Prerequisite) => boolean = () => false): Resolution {
+	resolve(action: ToolAction, satisfied: (p: Prerequisite) => boolean = () => false, cwd?: string): Resolution {
 		const candidates = this.active().filter((p) => p.action !== "custom" && !(p.effect === "REQUIRE_BEFORE" && p.prerequisite && satisfied(p.prerequisite)));
 		const targets: Array<string | undefined> = action.paths.length ? action.paths : [undefined];
 		const allowIds = new Set<string>();
 		for (const target of targets) {
-			const applicable = candidates.filter((p) => applies(p, action, target));
+			const applicable = candidates.filter((p) => applies(p, action, target, cwd));
 			if (!applicable.length) continue;
 			const winner = applicable.reduce((a, b) => (rank(b) > rank(a) ? b : a));
 			if (isRestrictive(winner)) return { policy: winner, target, allowIds: [] };
@@ -247,7 +261,7 @@ function rank(p: Policy): number {
 	return resourceSpecificity(p.resource) * 1e9 + actionSpecificity(p.action) * 1e8 + p.provenance.seq;
 }
 
-function applies(p: Policy, action: ToolAction, target: string | undefined): boolean {
+function applies(p: Policy, action: ToolAction, target: string | undefined, cwd?: string): boolean {
 	switch (p.action) {
 		case "install_deps":
 			return action.installsDeps;
@@ -257,7 +271,7 @@ function applies(p: Policy, action: ToolAction, target: string | undefined): boo
 			return action.gitCommit;
 		case "modify":
 			if (!action.mutates) return false;
-			if (p.resource === "*") return true;
+			if (p.resource === "*") return !(target !== undefined && isScratch(target, cwd));
 			if (target === undefined) return false;
 			if (p.resource === "tests") return TEST_PATH.test(target);
 			return pathMatches(target, p.resource);

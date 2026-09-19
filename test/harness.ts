@@ -27,6 +27,9 @@ export class FakePi {
 	status: string | undefined;
 	notes: string[] = [];
 	controller = new AbortController();
+	cwd = "/work/project";
+	/** extension tools pi reports as available and active */
+	tools: Array<{ name: string; description: string }> = [];
 	private seq = 0;
 
 	api(): ExtensionAPI {
@@ -47,11 +50,18 @@ export class FakePi {
 			sendUserMessage(msg: unknown) {
 				self.turnTriggers.push(`sendUserMessage:${JSON.stringify(msg)}`);
 			},
+			getAllTools() {
+				return self.tools;
+			},
+			getActiveTools() {
+				return self.tools.map((t) => t.name);
+			},
 		} as unknown as ExtensionAPI;
 	}
 
 	ctx() {
 		return {
+			cwd: this.cwd,
 			hasUI: true,
 			signal: this.controller.signal,
 			ui: {

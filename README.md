@@ -8,7 +8,7 @@ Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effect
 
 [![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1-7c5cff)](https://pi.dev)
 [![Jev](https://img.shields.io/badge/powered%20by-TypeSafe%20Jev-f5a524)](https://docs.typesafe.ai)
-[![tests](https://img.shields.io/badge/tests-91%20passing-2ea043)](#development)
+[![tests](https://img.shields.io/badge/tests-109%20passing-2ea043)](#development)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
@@ -53,17 +53,19 @@ Resolution per call: the most specific resource wins (file > dir > tests > every
 
 ## Benchmark
 
-49 scripted sessions and 197 labelled decisions: basics, lifecycle, long sessions with compaction, and adversarial input. Replayable offline from a recorded cassette. [Details and method →](bench/README.md)
+55 scripted sessions and 208 labelled decisions: basics, lifecycle, long sessions with compaction, adversarial input, and cases taken from the author's real sessions. Replayable offline from a recorded cassette. [Details and method →](bench/README.md)
 
 | | recall | false block | lifecycle | task success | cost / task |
 |---|---|---|---|---|---|
 | v0.3.0 + Jev | 71.4% | 5.2% | 70.5% | 61.2% | $0.000051 |
 | v0.4.0 + Jev | 95.2% | 0.6% | 95.5% | 93.9% | $0.000049 |
-| **v0.5.1, rules only** | 90.5% | 1.3% | 93.2% | 87.8% | $0 |
-| **v0.5.1 + Jev** | **97.6%** | **0.0%** | **100%** | **98.0%** | $0.000038 |
+| v0.5.1 + Jev | 97.6% | 0.0% | 100% | 98.0% | $0.000038 |
+| **v0.6.0, rules only** | 89.1% | 1.9% | 93.2% | 85.5% | $0 |
+| **v0.6.0 + Jev** | **97.8%** | **0.0%** | **100%** | **98.2%** | $0.000040 |
 
 Sessions with at least one false block: 16.3% (v0.3) → **0.0%**. Two cases sit at a threshold and flip between live
-recordings. v0.5.0 recorded 95.9–98.0%, v0.5.1 98.0% in two fresh recordings.
+recordings. From v0.6 the benchmark includes six cases from real sessions (6/6). v0.6.0 rules-only numbers are
+lower than v0.5's only because the new real-session cases are harder.
 
 ### Does it matter with a real model?
 
@@ -85,7 +87,7 @@ own principle, *code handles control flow; Jev provides common-sense perception*
 engine decides, Jev only answers narrow questions about what a message means. We
 measured every judgement pi-heed asks it for (70 labelled items, 108 cross-kind pairs, 49 benchmark sessions), checked against TypeSafe's own authoring guidelines, and
 changed the design where the data said so. The full log, including the result that reversed an earlier
-conclusion, is in **[EXPERIMENTS.md](EXPERIMENTS.md)** (E01–E11). Per-judgement tables are in [bench/JEV-LAB.md](bench/JEV-LAB.md).
+conclusion, is in **[EXPERIMENTS.md](EXPERIMENTS.md)** (E01–E12). Per-judgement tables are in [bench/JEV-LAB.md](bench/JEV-LAB.md).
 
 **What we found, and what we changed because of it**
 
@@ -100,6 +102,7 @@ conclusion, is in **[EXPERIMENTS.md](EXPERIMENTS.md)** (E01–E11). Per-judgemen
 | 7 | **TypeSafe's structured question format helps for some judgements, not all** | read-only 7/9 → **9/9**, tool relevance 5/8 → **8/8** safe skips, 0 wrong; go-ahead and exception checks got *worse* | Structured `{question, focus}` + `true/false` criteria where it measured better, prose elsewhere |
 | 8 | **Voting doesn't fix blind spots** | errors are correlated across phrasings; averaging mostly cost coverage | Better questions instead of ensembles |
 | 9 | **Don't ask Jev what the rules already know** | "an edit changes files": p ≈ 0.7 | Side effects, paths and scopes are deterministic rules; Jev only judges meaning |
+| 11 | **One request, one state: isolate a question that other context distracts** | go-ahead inside the shared state caught 5/9 lifts; in its own minimal request **8/9**, 0 false | go-ahead asked in a parallel request with only the message and the earlier rule |
 | 10 | **Only Jev-decided calls compound, so decide fewer** | deterministic decisions never erred · Jev-influenced decisions per benchmark: 52 → **12** with a per-prohibition tool-relevance check | Asks once per prohibition which tools can't break it, and skips those calls (0 wrong skips) |
 
 Cost stayed negligible throughout: ≈ $0.00004 per session, about 1.7 Jev calls.
@@ -179,27 +182,28 @@ Semantic checks need one of:
 
 ## Known limitations
 
-- Very loose phrasing is missed in both directions: *"you've got the green light for those changes"* is not read as a lift, and *"keep everything exactly as it is"* is not read as read-only. Neither the rules nor Jev (below threshold) pick them up. Say it directly.
+- A free-text prohibition is only enforced when Jev is confident (p ≥ 0.9, confidence ≥ 0.8). *"Don't send notifications"* vs a Slack webhook `curl` scored 0.76–0.88 and ran. That is fail-open by design.
 - *"Don't delete any data"* is judged violated by `rm -rf dist/` (p = 0.97). Whether build output is "data" is arguable.
-- A free-text prohibition is only enforced when Jev is confident (p ≥ 0.9, confidence ≥ 0.8). *"Don't send notifications"* vs a Slack webhook `curl` scored 0.70 and ran. That is fail-open by design.
 - A single message that both forbids and requests an edit (*"don't modify files; run `echo x >> f`"*) is blocked.
-- Shell side-effect and path detection is pattern-based; exotic commands can slip through.
+- Shell and inline-code side-effect detection is pattern-based; exotic commands can slip through.
 - `goal` scope only ends when Jev says a message starts a new task. Without a key it behaves like `session`.
-- With [pi-loop-police](https://github.com/sebaxzero/pi-loop-police) installed, identical repeats are blocked before pi-heed sees them.
+- The live benchmark covers one model (gemini-3.8-flash) and six scenarios.
 
 ## Roadmap
 
 - [ ] Suggest-only rollback to the last verified checkpoint (with [pi-rewind-hook](https://github.com/nicobailon/pi-rewind-hook))
 - [x] Benchmark: lifecycle, long sessions, compaction, adversarial ([bench/](bench/README.md))
 - [x] Fewer Jev-decided calls per session: per-policy tool relevance (E07)
-- [ ] Recalibrate thresholds from labelled real-session data (`/heed label`); E05 suggests 0.9 is conservative
+- [x] Fix what real sessions showed (E11 → v0.6): scratch files, design guidance, implicit lifts, inline code, extension tools
+- [ ] Live benchmark across more models and more changing-policy scenarios
+- [ ] Faster labelling (`/heed review`), then recalibrate thresholds from real sessions; E05 suggests 0.9 is conservative
 - [ ] Threshold calibration from `/heed label` data
 
 ## Development
 
 ```bash
 npm install
-npm test                                        # 91 tests, no network
+npm test                                        # 109 tests, no network
 node bench/run.ts --judge replay                # benchmark, offline
 npm run typecheck
 PI_HEED_ENV_FILE=~/.env npm run smoke:jev       # live Jev check

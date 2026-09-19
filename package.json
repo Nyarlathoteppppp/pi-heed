@@ -1,6 +1,6 @@
 {
 	"name": "pi-heed",
-	"version": "0.5.2",
+	"version": "0.6.0",
 	"description": "Evidence-backed course correction for the pi coding agent: keeps the agent on the constraints you set, powered by TypeSafe Jev.",
 	"type": "module",
 	"license": "MIT",

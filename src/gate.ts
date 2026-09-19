@@ -77,15 +77,20 @@ export const RELEVANCE_TOOLS: Record<string, string> = {
  * Per free-text prohibition, asked once for all known tools in one request: which tools cannot break it at all?
  * Lets pi-heed skip per-call checks that can only add risk ("never call the production API" vs a file edit).
  */
-export async function toolRelevance(judge: Judge | undefined, policy: Policy, timeoutMs: number): Promise<Record<string, boolean>> {
+export async function toolRelevance(
+	judge: Judge | undefined,
+	policy: Policy,
+	timeoutMs: number,
+	tools: Record<string, string> = RELEVANCE_TOOLS,
+): Promise<Record<string, boolean>> {
 	const questions = Object.fromEntries(
-		Object.entries(RELEVANCE_TOOLS).map(([tool, desc]) => [
+		Object.entries(tools).map(([tool, desc]) => [
 			tool,
 			{
 				// structured form (E09): 5/5 safe skips vs 3/5, still no wrong skip
 				type: "choice" as const,
 				instructions: {
-					question: "Can one call of the tool described in `tools." + tool + "` break `constraint` by itself?",
+					question: `Can one call of the tool described in \`tools["${tool}"]\` break \`constraint\` by itself?`,
 					focus: "The call's own effect when it runs, not what edited code might do later.",
 				},
 				criteria: {
@@ -96,9 +101,9 @@ export async function toolRelevance(judge: Judge | undefined, policy: Policy, ti
 			},
 		]),
 	);
-	const { answers } = await ask(judge, { constraint: policy.resource, tools: RELEVANCE_TOOLS }, questions, timeoutMs);
+	const { answers } = await ask(judge, { constraint: policy.resource, tools }, questions, timeoutMs);
 	const cannot: Record<string, boolean> = {};
-	for (const tool of Object.keys(RELEVANCE_TOOLS)) {
+	for (const tool of Object.keys(tools)) {
 		const a = answers?.[tool] as ChoiceAnswer | undefined;
 		cannot[tool] = !!a && a.type === "choice" && a.choice === "cannot" && (a.probabilities.cannot ?? 0) >= 0.9 && a.confidence >= 0.8;
 	}
