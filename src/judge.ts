@@ -74,10 +74,42 @@ export function resolveTransport(env: NodeJS.ProcessEnv = process.env): Transpor
 	return undefined;
 }
 
-function validAnswer(q: Question, a: any): a is Answer {
-	if (!a || typeof a !== "object") return false;
-	if (q.type === "noul") return typeof a.noul === "number";
-	return typeof a.choice === "string" && a.choice in q.criteria && typeof a.confidence === "number" && !!a.probabilities;
+const finite = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
+const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
+
+/**
+ * Validates an answer and clamps minor numeric overshoot into [0, 1]; anything non-finite or off-schema is
+ * rejected, which fails the call open. (Normalisation borrowed from thruwire/foreman, MIT.)
+ */
+function normalizeAnswer(q: Question, a: any): Answer | undefined {
+	if (!a || typeof a !== "object") return undefined;
+	if (q.type === "noul") return finite(a.noul) ? { type: "noul", noul: clamp01(a.noul) } : undefined;
+	if (typeof a.choice !== "string" || !(a.choice in q.criteria) || !finite(a.confidence) || !a.probabilities || typeof a.probabilities !== "object") return undefined;
+	const probabilities: Record<string, number> = {};
+	for (const [k, v] of Object.entries(a.probabilities)) {
+		if (!finite(v)) return undefined;
+		probabilities[k] = clamp01(v);
+	}
+	return { type: "choice", choice: a.choice, probabilities, confidence: clamp01(a.confidence) };
+}
+
+/** Transient statuses worth retrying (TypeSafe's SDK retries the same set). */
+const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+const MAX_RETRIES = 2;
+
+function retryDelay(res: Response | undefined, attempt: number): number {
+	const header = res?.headers.get("retry-after");
+	const seconds = header !== null && header !== undefined && header !== "" ? Number(header) : Number.NaN;
+	if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+	return 150 * 2 ** attempt;
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal.aborted) return reject(signal.reason);
+		const t = setTimeout(resolve, ms);
+		signal.addEventListener("abort", () => (clearTimeout(t), reject(signal.reason)), { once: true });
+	});
 }
 
 export class JevJudge implements Judge {
@@ -99,24 +131,35 @@ export class JevJudge implements Judge {
 		);
 	}
 
+	/**
+	 * One decision request. 429 and transient 5xx are retried (up to twice, honouring Retry-After) inside the
+	 * caller's deadline: the signal aborts any wait, so retries never make pi wait longer than the judge timeout.
+	 */
 	async decide(state: unknown, questions: Record<string, Question>, signal: AbortSignal): Promise<Record<string, Answer>> {
-		const res = await this.fetchFn(this.transport.url, {
-			method: "POST",
-			headers: {
-				Authorization: `Bearer ${this.transport.key}`,
-				"Content-Type": "application/json",
-				"X-Title": "pi-heed",
-			},
-			body: JSON.stringify({ model: this.transport.model, state, questions }),
-			signal,
-		});
+		const body = JSON.stringify({ model: this.transport.model, state, questions });
+		let res: Response | undefined;
+		for (let attempt = 0; ; attempt++) {
+			res = await this.fetchFn(this.transport.url, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${this.transport.key}`,
+					"Content-Type": "application/json",
+					"X-Title": "pi-heed",
+				},
+				body,
+				signal,
+			});
+			if (res.ok || !RETRYABLE.has(res.status) || attempt >= MAX_RETRIES) break;
+			await res.body?.cancel().catch(() => {});
+			await sleep(retryDelay(res, attempt), signal);
+		}
 		if (!res.ok) throw new Error(`jev http ${res.status}`);
-		const body = (await res.json()) as { answers?: Record<string, unknown> };
+		const parsed = (await res.json()) as { answers?: Record<string, unknown> };
 		const out: Record<string, Answer> = {};
 		for (const [key, q] of Object.entries(questions)) {
-			const a = body.answers?.[key];
-			if (!validAnswer(q, a)) throw new Error(`jev: malformed answer for ${key}`);
-			out[key] = { ...(a as Answer), type: q.type } as Answer;
+			const a = normalizeAnswer(q, parsed.answers?.[key]);
+			if (!a) throw new Error(`jev: malformed answer for ${key}`);
+			out[key] = a;
 		}
 		return out;
 	}

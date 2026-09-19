@@ -4,7 +4,7 @@ import { classify } from "../src/actions.ts";
 import { pathMatches, PolicyEngine } from "../src/policy.ts";
 import { parseMessage } from "../src/rules.ts";
 import { kinds as kindsOf } from "./harness.ts";
-import { JevJudge } from "../src/judge.ts";
+import { ask, JevJudge } from "../src/judge.ts";
 import { errorSignature, RepeatTracker } from "../src/repeat.ts";
 
 /** Feeds messages through the parser into a fresh engine, like the extension does. */
@@ -167,4 +167,52 @@ describe("interpreter-aware shell classification (real session)", () => {
 		[`ssh host 'rm -rf /srv/app'`, true],
 	];
 	for (const [command, mutates] of cases) it(command.replace(/\n/g, "⏎").slice(0, 60), () => assert.equal(classify("bash", { command }).mutates, mutates));
+});
+
+describe("JevJudge: retries and answer validation (borrowed from thruwire/foreman)", () => {
+	const transport = { url: "https://api.typesafe.ai/v1/systemone", model: "jev-latest", key: "k" };
+	const noulQ = { q: { type: "noul" as const, instructions: "?" } };
+	const scripted = (responses: Array<{ status: number; body?: unknown; headers?: Record<string, string> }>) => {
+		let i = 0;
+		const fn = (async () => {
+			const r = responses[Math.min(i++, responses.length - 1)];
+			return new Response(JSON.stringify(r.body ?? {}), { status: r.status, headers: r.headers });
+		}) as unknown as typeof fetch;
+		return { fn, calls: () => i };
+	};
+
+	it("retries a 429 and then succeeds", async () => {
+		const f = scripted([{ status: 429, headers: { "retry-after": "0" } }, { status: 200, body: { answers: { q: { noul: 0.7 } } } }]);
+		const a = await new JevJudge(transport, f.fn).decide({}, noulQ, new AbortController().signal);
+		assert.equal((a.q as any).noul, 0.7);
+		assert.equal(f.calls(), 2);
+	});
+
+	it("gives up after two retries on 5xx", async () => {
+		const f = scripted([{ status: 503 }]);
+		await assert.rejects(new JevJudge(transport, f.fn).decide({}, noulQ, new AbortController().signal), /503/);
+		assert.equal(f.calls(), 3);
+	});
+
+	it("does not retry a 4xx that isn't 429", async () => {
+		const f = scripted([{ status: 401 }]);
+		await assert.rejects(new JevJudge(transport, f.fn).decide({}, noulQ, new AbortController().signal), /401/);
+		assert.equal(f.calls(), 1);
+	});
+
+	it("a Retry-After beyond the deadline fails open via the caller's timeout", async () => {
+		const f = scripted([{ status: 429, headers: { "retry-after": "30" } }, { status: 200, body: { answers: { q: { noul: 0.7 } } } }]);
+		const t0 = Date.now();
+		const r = await ask(new JevJudge(transport, f.fn), {}, noulQ, 50);
+		assert.equal(r.answers, undefined);
+		assert.equal(r.error, "timeout");
+		assert.ok(Date.now() - t0 < 1000);
+	});
+
+	it("clamps small overshoot and rejects non-finite values", async () => {
+		const ok = scripted([{ status: 200, body: { answers: { q: { noul: 1.0000001 } } } }]);
+		assert.equal(((await new JevJudge(transport, ok.fn).decide({}, noulQ, new AbortController().signal)).q as any).noul, 1);
+		const bad = scripted([{ status: 200, body: { answers: { q: { noul: "NaN" } } } }]);
+		await assert.rejects(new JevJudge(transport, bad.fn).decide({}, noulQ, new AbortController().signal), /malformed/);
+	});
 });
