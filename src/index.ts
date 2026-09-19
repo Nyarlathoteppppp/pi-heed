@@ -64,6 +64,9 @@ interface Decision {
 const MODES: Mode[] = ["off", "shadow", "enforce"];
 const MODE_HELP: Record<Mode, string> = { off: "do nothing", shadow: "decide and log, never block", enforce: "block calls that break your rules" };
 const SUBCOMMANDS: Record<string, string> = {
+	on: "enforce: block calls that break your rules",
+	off: "stop checking (this session)",
+	shadow: "decide and log, never block",
 	status: "mode, Jev, active rules, budget",
 	policies: "the rules in force right now",
 	history: "lifted and expired rules, and why",
@@ -74,7 +77,11 @@ const SUBCOMMANDS: Record<string, string> = {
 	add: "<text>: add a rule by hand",
 	drop: "<id> | all: remove a rule",
 	log: "[n]: raw decision log",
+	help: "this list",
 };
+const HELP = Object.entries(SUBCOMMANDS)
+	.map(([name, d]) => `/heed ${name.padEnd(9)} ${d}`)
+	.join("\n");
 const MEMO_LIMIT = 200;
 /** Tools whose path argument streams before a (possibly long) body. */
 const PATH_FIRST_TOOLS = new Set(["edit", "write"]);
@@ -549,8 +556,8 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		`${p.id} ${describe(p)}${p.exceptions.length ? ` except ${p.exceptions.join(",")}` : ""}  ← ${p.provenance.by} #${p.provenance.at}: "${truncate(p.sourceQuote, 80)}"`;
 
 	pi.registerCommand("heed", {
-		// Kept short: command menus (pi-web) truncate long descriptions. Each subcommand explains itself below.
-		description: "pi-heed: rules you set in this chat",
+		// pi-web shows only this one line (no argument completions), so it names the common subcommands; `/heed` alone prints the rest.
+		description: "pi-heed · on | off | status | policies | help",
 		getArgumentCompletions: (prefix) => {
 			const [sub, ...rest] = prefix.split(/\s+/);
 			if (rest.length && sub === "mode") {
@@ -562,15 +569,31 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 				.map(([name, description]) => ({ value: name, label: name, description }));
 		},
 		handler: async (args, ctx) => {
-			const [sub = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+			const [sub = "", ...rest] = args.trim().split(/\s+/).filter(Boolean);
 			const arg = rest.join(" ");
 			const say = (msg: string, level: "info" | "warning" = "info") => ctx.ui.notify(msg, level);
+			const setMode = (mode: Mode) => {
+				config.mode = mode;
+				pi.appendEntry("heed-config", { mode });
+				status(ctx);
+				return say(`pi-heed mode: ${mode}${mode === "enforce" ? " (on)" : ""}  · this session; default is in ~/.pi/agent/pi-heed.json`);
+			};
 			switch (sub) {
+				case "on":
+					return setMode("enforce");
+				case "off":
+				case "shadow":
+				case "enforce":
+					return setMode(sub);
+				case "help":
+					return say(HELP);
+				case "":
 				case "status":
 					return say(
 						[
 							`mode: ${config.mode}   judge: ${judge?.name ?? "none (rules only): set envFile in ~/.pi/agent/pi-heed.json"}   interventions this run: ${interventions}/${config.maxInterventionsPerRun}`,
 							...engine.active().map((p) => `  ${line(p)}`),
+							...(sub ? [] : ["", HELP]),
 						].join("\n"),
 					);
 				case "policies":
@@ -596,12 +619,11 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 							.join("\n"),
 					);
 				}
-				case "mode":
-					if (!MODES.includes(arg as Mode)) return say(`usage: /heed mode <${MODES.join("|")}>`, "warning");
-					config.mode = arg as Mode;
-					pi.appendEntry("heed-config", { mode: arg });
-					status(ctx);
-					return say(`pi-heed mode: ${config.mode}`);
+				case "mode": {
+					const mode = arg === "on" ? "enforce" : arg;
+					if (!MODES.includes(mode as Mode)) return say(`usage: /heed mode <on|${MODES.join("|")}>`, "warning");
+					return setMode(mode as Mode);
+				}
 				case "add": {
 					if (!arg) return say("usage: /heed add <prohibition text>", "warning");
 					const lines = commit({
@@ -660,7 +682,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 					return say(`labelled #${n} ${verdict}`);
 				}
 				default:
-					return say(`unknown subcommand ${sub}`, "warning");
+					return say(`unknown subcommand ${sub}\n${HELP}`, "warning");
 			}
 		},
 	});

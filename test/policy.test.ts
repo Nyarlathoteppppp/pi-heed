@@ -483,7 +483,7 @@ describe("commands: short menu entry, per-subcommand help, drop all", () => {
 	it("completions carry their own descriptions; mode completes its values", async () => {
 		const { pi } = setup({ judge: null });
 		const cmd = (pi as any).commands.get("heed");
-		assert.ok(cmd.description.length <= 40);
+		assert.ok(cmd.description.length <= 60);
 		const all = await cmd.getArgumentCompletions("");
 		assert.ok(all.every((c: any) => c.description));
 		assert.deepEqual((await cmd.getArgumentCompletions("mode e")).map((c: any) => c.value), ["mode enforce"]);
@@ -496,5 +496,19 @@ describe("commands: short menu entry, per-subcommand help, drop all", () => {
 		await pi.command("/heed drop all");
 		assert.equal(heed.engine.active().length, 0);
 		assert.equal(heed.engine.history().length, 3);
+	});
+});
+
+describe("commands: on/off", () => {
+	it("/heed on = enforce, /heed off = off, mode on works too", async () => {
+		const { pi, heed } = setup({ judge: null });
+		await pi.command("/heed on");
+		assert.equal(heed.config.mode, "enforce");
+		await pi.command("/heed off");
+		assert.equal(heed.config.mode, "off");
+		await pi.command("/heed mode on");
+		assert.equal(heed.config.mode, "enforce");
+		const cmd = (pi as any).commands.get("heed");
+		assert.match(cmd.description, /on \| off/);
 	});
 });

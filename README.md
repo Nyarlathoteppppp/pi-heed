@@ -8,7 +8,7 @@ Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effect
 
 [![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1-7c5cff)](https://pi.dev)
 [![Jev](https://img.shields.io/badge/powered%20by-TypeSafe%20Jev-f5a524)](https://docs.typesafe.ai)
-[![tests](https://img.shields.io/badge/tests-124%20passing-2ea043)](#development)
+[![tests](https://img.shields.io/badge/tests-125%20passing-2ea043)](#development)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
@@ -129,7 +129,7 @@ pi install git:github.com/Nyarlathoteppppp/pi-heed
 Rules work immediately. For the semantic layer, give it a Jev key (see below). It starts in **shadow mode**: it decides and logs, but never interferes until you say so:
 
 ```
-/heed mode enforce
+/heed on
 ```
 
 ## What it checks
@@ -186,13 +186,14 @@ key was found.
 ## Commands
 
 ```
+/heed                            status, then this list
+/heed on | off | shadow          enforce / stop checking / log only (this session)
 /heed status                     mode, judge, active policies, budget
 /heed policies                   the resolved policy right now
 /heed history                    superseded and expired policies, and why they ended
 /heed explain <id>               which of your sentences a policy came from, its exceptions
-/heed mode <off|shadow|enforce>
 /heed add <text>                 add a free-text prohibition by hand
-/heed drop <id>|all                remove one rule, or all of them
+/heed drop <id>|all              remove one rule, or all of them
 /heed log [n]                    recent decisions (with pre-judge / wait times)
 /heed review [n]                 recent decisions, numbered
 /heed label [n] <good|bad> [note]  label decision n from /heed review (default: the latest)
