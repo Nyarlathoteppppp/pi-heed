@@ -36,6 +36,9 @@ const GIT_COMMIT = /\bgit\s+commit\b/;
 const RUNS_TESTS = /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|\b(?:pytest|jest|vitest|mocha|rspec|phpunit)\b|\bgo\s+test\b|\bcargo\s+test\b|\bmake\s+test\b|\bnode\s+--test\b|\bpython3?\s+-m\s+(?:pytest|unittest)\b/;
 
 const INTERPRETER = String.raw`\b(?:python3?|node|ruby|perl|bun|deno)\b`;
+// Commands that can act on other systems or run arbitrary code. Test runs and plain reads are not in it.
+const REACHES_OUT =
+	/\b(?:curl|wget|https?|httpie|xh|ssh|scp|sftp|rsync|nc|ncat|telnet|ftp|psql|mysql|mongo(?:sh)?|redis-cli|sqlite3|kubectl|helm|docker|podman|aws|gcloud|az|gh|terraform|ansible|python3?|node|ruby|perl|php|deno|bun|npx|pnpx|osascript|open|sendmail|mail)\b|\b(?:npm|pnpm|yarn)\s+(?:run|exec|dlx)\b|\bmake\b|\b(?:go|cargo)\s+run\b|\beval\b|\b(?:sh|bash|zsh)\s+(?:-\w*c\b|\S+\.sh\b)|(?:^|[\s;&|])\.\/\S+/;
 // Code handed to an interpreter inline: a heredoc body, or the string after -c / -e / -p.
 const HEREDOC = new RegExp(String.raw`(${INTERPRETER}[^\n]*?)<<-?\s*(['"]?)(\w+)\2[^\n]*\n([\s\S]*?)\n[ \t]*\3(?=\s|'|"|$)`, "g");
 const INLINE = new RegExp(String.raw`(${INTERPRETER}(?:\s+-[A-Za-z]+)*?\s+-[cep]\s+)(['"])([\s\S]*?)(?<!\\)\2`, "g");
@@ -164,6 +167,7 @@ export function classify(toolName: string, input: Record<string, unknown>, cwd?:
 			runsTests: RUNS_TESTS.test(command),
 			paths: extractPaths(command),
 			...(writes && !code.length ? { writes } : {}),
+			reachesOut: REACHES_OUT.test(command) && !RUNS_TESTS.test(command),
 			summary: `bash: ${truncate(command, 200)}`,
 		};
 	}

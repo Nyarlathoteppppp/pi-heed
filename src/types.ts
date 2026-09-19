@@ -15,6 +15,9 @@ export interface ToolAction {
 	paths: string[];
 	/** bash only: the paths it writes, when every write in the command could be read off it; else undefined. */
 	writes?: string[];
+	/** bash only: can reach other systems or run arbitrary code (network clients, interpreters, scripts), so a
+	 * free-text rule ("never call the production API") has to be checked even when no file changes. */
+	reachesOut?: boolean;
 	/** One-line human-readable description, used as evidence. */
 	summary: string;
 }

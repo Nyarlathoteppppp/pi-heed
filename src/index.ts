@@ -3,12 +3,13 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { classify, truncate } from "./actions.ts";
-import { exceptionCheck, judgeCheck, policyVerdict, RELEVANCE_TOOLS, toolRelevance } from "./gate.ts";
+import { exceptionCheck, judgeCheck, policyVerdict, RELEVANCE_TOOLS, toolRelevance, unlessCheck } from "./gate.ts";
 import { JevJudge, type Judge, resolveTransport, settle } from "./judge.ts";
-import { describe, plain, type Policy, PolicyEngine, type PolicyOp, type Prerequisite, type Resolution } from "./policy.ts";
+import { describe, isRestrictive, plain, type Policy, PolicyEngine, type PolicyOp, type Prerequisite, type Resolution } from "./policy.ts";
 import { RepeatTracker } from "./repeat.ts";
 import { mentionedPaths, parseMessage, pastedBody } from "./rules.ts";
 import { DEFAULT_CONFIG, type HeedConfig, type Mode, type ToolAction, type Verdict } from "./types.ts";
+import { registerLedgerTools } from "./tools.ts";
 import { understand } from "./understand.ts";
 
 export interface HeedOptions {
@@ -31,6 +32,8 @@ export interface HeedLogRecord {
 	verdict?: Verdict;
 	/** A rule block that Jev found the user had explicitly excepted. */
 	exception?: { choice: string; p: number; confidence: number };
+	/** Rules whose `unless` the call met: set aside for this call. */
+	exempted?: string[];
 	note?: string;
 	ms?: number;
 	/** Gate decision was computed while the model was still streaming the call. */
@@ -47,7 +50,7 @@ export interface HeedLogRecord {
 
 /** Persisted policy ops. `rules` entries mark a user message as parsed, so a rebuild never re-parses it. */
 export interface PolicyEntry {
-	kind: "rules" | "jev" | "use" | "end" | "command";
+	kind: "rules" | "jev" | "use" | "end" | "command" | "model";
 	at: number;
 	ops: PolicyOp[];
 	source?: "extension";
@@ -57,11 +60,15 @@ interface Decision {
 	verdict?: Verdict;
 	policyId?: string;
 	exception?: HeedLogRecord["exception"];
+	/** Rules set aside because the call met their `unless`. */
+	exempted?: string[];
 	error?: string;
 	ms: number;
 }
 
 const MODES: Mode[] = ["off", "shadow", "enforce"];
+export type Pipeline = "interpret" | "ledger" | "ledger+regex";
+const PIPELINES: Pipeline[] = ["interpret", "ledger", "ledger+regex"];
 const MODE_HELP: Record<Mode, string> = { off: "do nothing", shadow: "decide and log, never block", enforce: "block calls that break your rules" };
 const SUBCOMMANDS: Record<string, string> = {
 	on: "enforce: block calls that break your rules",
@@ -136,9 +143,17 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	const transport = options.judge === undefined ? resolveTransport(env) : undefined;
 	const judge: Judge | undefined = options.judge === undefined ? (transport ? new JevJudge(transport) : undefined) : (options.judge ?? undefined);
 
+	// Evaluation only, not a user setting: how rules come to exist. "interpret" is the 0.8 behaviour (parser + Jev
+	// reading every message); "ledger" leaves understanding to the main model, which records rules with heed_record /
+	// heed_lift; "ledger+regex" adds the parser's explicit hard rules as a fallback.
+	const pipeline: Pipeline = PIPELINES.includes(env.PI_HEED_PIPELINE as Pipeline) ? (env.PI_HEED_PIPELINE as Pipeline) : "interpret";
+	const ledger = pipeline !== "interpret";
+
 	const engine = new PolicyEngine();
 	const repeat = new RepeatTracker(config.repeatThreshold);
 	const userMessages: string[] = [];
+	/** Indexes of user-role messages another extension injected: never parsed, never evidence. */
+	const injected = new Set<number>();
 	const pending = new Map<string, ToolAction>();
 	const speculative = new Map<string, { inputKey: string; decision: Promise<Decision | undefined>; early: boolean; path?: string }>();
 	const memo = new Map<string, Promise<Decision>>();
@@ -166,6 +181,15 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	const canIntervene = () => config.mode === "enforce" && interventions < config.maxInterventionsPerRun;
 	const satisfied = (p: Prerequisite) => p === "tests" && testsOkEpoch === repeat.epoch;
 
+	/** The rules the parser contributes under this pipeline. */
+	function parseFor(text: string, at: number): PolicyOp[] {
+		if (pipeline === "ledger") return [];
+		const ops = parseMessage(text, at);
+		if (pipeline === "interpret") return ops;
+		// explicit hard rules only: no holds, no free text, no permissions (the model records those)
+		return ops.filter((op) => op.op === "add" && op.spec.effect !== "ALLOW" && op.spec.action !== "custom" && !op.spec.until);
+	}
+
 	function applyOps(ops: PolicyOp[]): string[] {
 		const lines = ops.flatMap((op) => engine.apply(op));
 		if (lines.length) memo.clear();
@@ -187,10 +211,13 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		memo.clear();
 		relevance.clear();
 		userMessages.length = 0;
+		injected.clear();
 		understanding = undefined;
 		testsOkEpoch = -1;
 		const branch = ctx.sessionManager.getBranch() as Array<Record<string, any>>;
-		const parsed = new Set(branch.filter((e) => e.type === "custom" && e.customType === "heed-policy" && e.data?.kind === "rules").map((e) => e.data.at as number));
+		const markers = branch.filter((e) => e.type === "custom" && e.customType === "heed-policy" && e.data?.kind === "rules");
+		const parsed = new Set(markers.map((e) => e.data.at as number));
+		for (const e of markers) if (e.data.source === "extension") injected.add(e.data.at as number);
 		for (const entry of branch) {
 			if (entry.type === "message" && entry.message?.role === "user") {
 				const text = textOf(entry.message.content);
@@ -198,7 +225,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 				const at = userMessages.length;
 				userMessages.push(text);
 				// Sessions from before the policy engine: parse now.
-				if (!parsed.has(at)) applyOps(parseMessage(text, at));
+				if (!parsed.has(at)) applyOps(parseFor(text, at));
 			} else if (entry.type === "custom" && entry.customType === "heed-policy") {
 				applyOps((entry.data as PolicyEntry).ops ?? []);
 			} else if (entry.type === "custom" && entry.customType === "heed-constraint") {
@@ -233,8 +260,9 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	async function restrictiveDecision(r: Resolution, action: ToolAction, signal?: AbortSignal): Promise<Decision> {
 		const p = r.policy!;
 		const verdict = policyVerdict(r, action)!;
-		// Satisfiable by doing the prerequisite; no exception to look for.
-		if (p.effect === "REQUIRE_BEFORE") return { verdict, policyId: p.id, ms: 0 };
+		// Satisfiable by doing the prerequisite; no exception to look for. In a ledger pipeline the main model records
+		// permissions itself (heed_record allow); pi-heed does not re-read the conversation for them.
+		if (p.effect === "REQUIRE_BEFORE" || ledger) return { verdict, policyId: p.id, ms: 0 };
 		// Only messages the rules did NOT already turn into a permission: a permission they did parse has
 		// its own lifecycle (a used once-permission must not be revived by re-reading its message).
 		const understood = new Set(engine.all().filter((q) => q.effect === "ALLOW").map((q) => q.provenance.at));
@@ -250,9 +278,21 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 
 	/** Full gate decision: resolved policy state first, then Jev for free-text prohibitions. */
 	async function decide(action: ToolAction, input: Record<string, unknown>, signal?: AbortSignal): Promise<Decision> {
-		const r = engine.resolve(action, satisfied, cwd);
-		if (r.policy) return restrictiveDecision(r, action, signal);
+		// A rule with an `unless` the call meets is set aside on its own; whatever else applies still decides.
+		const exempt = new Set<string>();
+		for (;;) {
+			const r = engine.resolve(action, satisfied, cwd, exempt);
+			if (!r.policy) break;
+			if (!r.policy.unless) return restrictiveDecision(r, action, signal);
+			const x = await unlessCheck(judge, r.policy, action, input, config.judgeTimeoutMs, signal);
+			if (!x.excepted) {
+				const d = await restrictiveDecision(r, action, signal);
+				return { ...d, ms: d.ms + x.ms, error: d.error ?? x.error };
+			}
+			exempt.add(r.policy.id);
+		}
 		const custom = await relevantCustom(engine.customDenies(), action.toolName);
+		if (custom.length === 0 && exempt.size) return { ms: 0, exempted: [...exempt] };
 		if (custom.length === 0) return { ms: 0 };
 		const key = JSON.stringify([custom.map((c) => c.id), action.toolName, input]);
 		let hit = memo.get(key);
@@ -302,6 +342,15 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		return custom.filter((_, i) => !cannot[i]?.[tool]);
 	}
 
+	/**
+	 * Calls worth deciding: anything that changes state or is unknown, and every shell command while a free-text
+	 * rule is active ("never call the production API" is broken by a plain GET). pi-heed's own tools never.
+	 */
+	function checkable(action: ToolAction): boolean {
+		if (action.toolName === "heed_record" || action.toolName === "heed_lift") return false;
+		return action.mutates || action.effect === "unknown" || (!!action.reachesOut && engine.customDenies().length > 0);
+	}
+
 	/** Once-permissions that let a call through are used up. */
 	function consume(allowIds: string[]) {
 		const ops = allowIds.filter((id) => engine.get(id)?.scope === "once").map((id): PolicyOp => ({ op: "use", id }));
@@ -317,9 +366,9 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		ctx: ExtensionContext,
 		extra: { prejudged: boolean; waitedMs: number; stale: boolean },
 	): { block: true; reason: string } | undefined {
-		const { verdict, exception, error, ms, policyId } = d;
-		if (!verdict && !exception && !error) return;
-		const base = { kind: "gate" as const, tool: action.toolName, summary: action.summary, policy: policyId, verdict, exception, ms, error, prejudged: extra.prejudged, waitedMs: extra.waitedMs };
+		const { verdict, exception, error, ms, policyId, exempted } = d;
+		if (!verdict && !exception && !error && !exempted) return;
+		const base = { kind: "gate" as const, tool: action.toolName, summary: action.summary, policy: policyId, verdict, exception, exempted, ms, error, prejudged: extra.prejudged, waitedMs: extra.waitedMs };
 		// A result for a run that is over (Esc, new prompt) must not act on the new one.
 		if (extra.stale) {
 			log({ ...base, acted: false, stale: true });
@@ -357,7 +406,28 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		}
 		interventions++;
 		status(ctx, `blocked ${action.toolName}`);
-		return { block: true, reason: `[pi-heed] ${verdict!.evidence}` };
+		const remedy =
+			ledger && policyId
+				? ` If the user has since lifted rule ${policyId}, call heed_lift with it and their exact words; if they gave a one-off permission, heed_record an allow. Otherwise ask the user.`
+				: "";
+		return { block: true, reason: `[pi-heed] ${verdict!.evidence}${remedy}` };
+	}
+
+	// The main model keeps the ledger. Registered for the whole process (the tool list is part of the cached prompt).
+	if (ledger) {
+		registerLedgerTools(pi, {
+			judge,
+			timeoutMs: config.judgeTimeoutMs,
+			messages: () => userMessages,
+			injected: () => injected,
+			policy: (id) => engine.get(id),
+			affectedBy: (spec) => engine.affectedBy(spec),
+			commit: (ops) => {
+				const lines = commit({ kind: "model", at: userMessages.length - 1, ops });
+				if (lines.length && config.mode !== "off") log({ kind: "constraint", acted: false, constraints: lines });
+				return lines;
+			},
+		});
 	}
 
 	pi.on("session_start", (_e, ctx) => {
@@ -375,17 +445,18 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		// Only the human's words define policy; our own and other extensions' injections do not.
 		// Still recorded (empty) so a rebuild knows this message was seen and never parses it.
 		if (event.source === "extension") {
+			injected.add(at);
 			commit({ kind: "rules", at, ops: [], source: "extension" });
 			return;
 		}
 		// Parsed in every mode (local, deterministic) so switching modes never loses what was said.
 		const before = engine.active();
 		const seqBefore = engine.all().length;
-		const lines = commit({ kind: "rules", at, ops: parseMessage(event.text, at) });
+		const lines = commit({ kind: "rules", at, ops: parseFor(event.text, at) });
 		if (config.mode === "off") return;
 		if (lines.length) log({ kind: "constraint", acted: false, constraints: lines });
 		status(ctx);
-		if (!judge) return;
+		if (!judge || ledger) return;
 		const text = event.text;
 		const input = {
 			message: text,
@@ -415,7 +486,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		if (config.mode === "off" || !config.inform) return;
 		const active = engine.active();
 		if (!active.length) return;
-		const lines = active.map((p) => `- ${plain(p)}. The user said: "${truncate(p.sourceQuote, 160)}"`);
+		const lines = active.map((p) => `- [${p.id}] ${plain(p)}. The user said: "${truncate(p.sourceQuote, 160)}"`);
 		return {
 			systemPrompt:
 				`${event.systemPrompt}\n\n## Rules the user set in this conversation\n` +
@@ -451,6 +522,8 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		if (e.type === "toolcall_delta") {
 			const tc = e.partial.content[e.contentIndex];
 			if (tc?.type !== "toolCall" || !PATH_FIRST_TOOLS.has(tc.name) || speculative.has(tc.id)) return;
+			// A rule with an `unless` is judged on what the call does, not only where: wait for the full arguments.
+			if (engine.active().some((p) => p.unless && isRestrictive(p))) return;
 			const args = (tc.arguments ?? {}) as Record<string, unknown>;
 			// A streamed string is only final once the model has moved on to the next key.
 			if (typeof args.path !== "string" || !Object.keys(args).some((k) => k !== "path")) return;
@@ -466,7 +539,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		if (e.type !== "toolcall_end") return;
 		const { id, name, arguments: args } = e.toolCall;
 		const action = classify(name, args, cwd);
-		if (!action.mutates && action.effect !== "unknown") return;
+		if (!checkable(action)) return;
 		const prior = speculative.get(id);
 		const reuse = prior?.early && prior.path === args.path;
 		const decision = reuse
@@ -482,7 +555,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		const input = event.input as Record<string, unknown>;
 		const action = classify(event.toolName, input, cwd);
 		pending.set(event.toolCallId, action);
-		if (!action.mutates && action.effect !== "unknown") return;
+		if (!checkable(action)) return;
 
 		const started = Date.now();
 		const myRun = run;

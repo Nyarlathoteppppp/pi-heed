@@ -1,3 +1,4 @@
+import { basename, matchesGlob } from "node:path";
 import { TEST_PATH } from "./actions.ts";
 import type { ToolAction } from "./types.ts";
 
@@ -16,7 +17,8 @@ export interface Provenance {
 	at: number;
 	/** Global creation order; newer wins ties. */
 	seq: number;
-	by: "rule" | "jev" | "command";
+	/** rule: the parser · jev: Jev's reading · command: /heed · model: the main model via heed_record / heed_lift */
+	by: "rule" | "jev" | "command" | "model";
 	/** Policy id or op that ended it. */
 	endedBy?: string;
 	endReason?: string;
@@ -36,6 +38,8 @@ export interface Policy {
 	prerequisite?: Prerequisite;
 	/** "go_ahead": a hold ("先别改", "don't change anything yet", read-only): ends when the user says to proceed. */
 	until?: "go_ahead";
+	/** A semantic exception to this restriction ("unless it only fixes a typo"): Jev judges it on the full call. */
+	unless?: string;
 	provenance: Provenance;
 }
 
@@ -47,6 +51,7 @@ export interface PolicySpec {
 	sourceQuote: string;
 	prerequisite?: Prerequisite;
 	until?: "go_ahead";
+	unless?: string;
 	by: Provenance["by"];
 	at: number;
 }
@@ -85,10 +90,20 @@ function normPath(p: string): string {
 	return p.replace(/^\.\//, "").replace(/\/$/, "");
 }
 
-/** True when `path` is `frag` or inside it on a path-segment boundary ("a.ts" matches "src/a.ts", not "data.ts"). */
+/**
+ * True when `path` is `frag` or inside it on a path-segment boundary ("a.ts" matches "src/a.ts", not "data.ts").
+ * A glob ("*.md", "docs/**") matches the path, any path ending in it, or (without a slash) the file name.
+ */
 export function pathMatches(path: string, frag: string): boolean {
 	const p = normPath(path);
 	const f = normPath(frag);
+	if (/[*?[]/.test(f)) {
+		try {
+			return matchesGlob(p, f) || matchesGlob(p, `**/${f}`) || (!f.includes("/") && matchesGlob(basename(p), f));
+		} catch {
+			return false;
+		}
+	}
 	return p === f || p.endsWith(`/${f}`) || p.startsWith(`${f}/`) || p.includes(`/${f}/`);
 }
 
@@ -173,7 +188,15 @@ export class PolicyEngine {
 		const restrictive = RESTRICTIVE.has(spec.effect);
 		// Exact duplicate with nothing contradicting it: keep the older one (its provenance is the original).
 		// If a contradicting policy is active on the same thing, this is a RE-APPLY and goes through.
-		const duplicate = same.some((p) => p.effect === spec.effect && p.scope === spec.scope && p.prerequisite === spec.prerequisite);
+		// A different `unless` is a different rule; but the parser never overrides what the model recorded with
+		// more detail (the parser reads the message first, the model may record the same ban with its exception).
+		const duplicate = same.some(
+			(p) =>
+				p.effect === spec.effect &&
+				p.scope === spec.scope &&
+				p.prerequisite === spec.prerequisite &&
+				((p.unless ?? "") === (spec.unless ?? "") || (spec.by === "rule" && p.provenance.by === "model")),
+		);
 		const contradicted = same.some((p) => RESTRICTIVE.has(p.effect) !== restrictive);
 		if (duplicate && !contradicted) return [];
 
@@ -198,6 +221,7 @@ export class PolicyEngine {
 			status: "active",
 			...(spec.prerequisite ? { prerequisite: spec.prerequisite } : {}),
 			...(spec.until ? { until: spec.until } : {}),
+			...(spec.unless ? { unless: spec.unless } : {}),
 			provenance: { at: spec.at, seq: this.seq, by: spec.by },
 		};
 		// A restriction on exactly this (re-apply), or a newer restriction of another kind, replaces
@@ -226,8 +250,12 @@ export class PolicyEngine {
 	 * The deciding policy for a tool action. For each target path the most specific applicable policy
 	 * wins (resource, then action, then recency). Any restricted target restricts the whole call.
 	 */
-	resolve(action: ToolAction, satisfied: (p: Prerequisite) => boolean = () => false, cwd?: string): Resolution {
-		const candidates = this.active().filter((p) => p.action !== "custom" && !(p.effect === "REQUIRE_BEFORE" && p.prerequisite && satisfied(p.prerequisite)));
+	resolve(action: ToolAction, satisfied: (p: Prerequisite) => boolean = () => false, cwd?: string, exempt: ReadonlySet<string> = new Set()): Resolution {
+		// `exempt`: restrictions whose `unless` Jev found this call meets. Each is set aside on its own; broader
+		// restrictions and anything else that applies still decide (an exception is not a permission).
+		const candidates = this.active().filter(
+			(p) => p.action !== "custom" && !exempt.has(p.id) && !(p.effect === "REQUIRE_BEFORE" && p.prerequisite && satisfied(p.prerequisite)),
+		);
 		// A bash command that only writes to known paths is judged on those, not on everything it reads.
 		const paths = action.writes ?? action.paths;
 		const targets: Array<string | undefined> = paths.length ? paths : [undefined];
@@ -240,6 +268,13 @@ export class PolicyEngine {
 			allowIds.add(winner.id);
 		}
 		return { allowIds: [...allowIds] };
+	}
+
+	/** Active restrictions a lasting permission for `spec` would end or carve into (as `add` does). */
+	affectedBy(spec: Pick<PolicySpec, "action" | "resource">): Policy[] {
+		return this.active().filter(
+			(q) => isRestrictive(q) && (q.action === spec.action || (q.action === "modify" && spec.action === "modify")) && (q.resource === spec.resource || covers(q.resource, spec.resource)),
+		);
 	}
 
 	customDenies(): Policy[] {
@@ -301,10 +336,11 @@ const ACTION_TEXT: Record<PolicyAction, string> = {
 };
 
 export function describe(p: Policy): string {
-	if (p.action === "custom") return `${p.effect} "${p.resource}" (${p.scope})`;
+	const unless = p.unless ? ` unless "${p.unless}"` : "";
+	if (p.action === "custom") return `${p.effect} "${p.resource}"${unless} (${p.scope})`;
 	const what = p.action === "modify" ? `modify ${p.resource === "*" ? "anything" : p.resource}` : ACTION_TEXT[p.action];
 	const pre = p.prerequisite ? ` unless ${p.prerequisite} ran first` : "";
-	return `${p.effect} ${what}${pre} (${p.scope})`;
+	return `${p.effect} ${what}${pre}${unless} (${p.scope})`;
 }
 
 /** Plain-language line for the system prompt: what the model may or may not do, in the user's own words. */
@@ -319,8 +355,8 @@ export function plain(p: Policy): string {
 		case "REQUIRE_BEFORE":
 			return `Before ${p.action.replace("_", " ")}: run the ${p.prerequisite} and make no changes after they pass`;
 		default:
-			if (p.action === "custom") return `Do not: ${p.resource}`;
-			if (p.action === "modify") return `Do not modify ${where(p.resource)}${scope}`;
-			return `Do not ${p.action === "install_deps" ? "add dependencies" : p.action.replace("_", " ")}${scope}`;
+			if (p.action === "custom") return `Do not: ${p.resource}${p.unless ? ` (except: ${p.unless})` : ""}`;
+			if (p.action === "modify") return `Do not modify ${where(p.resource)}${scope}${p.unless ? ` (except: ${p.unless})` : ""}`;
+			return `Do not ${p.action === "install_deps" ? "add dependencies" : p.action.replace("_", " ")}${scope}${p.unless ? ` (except: ${p.unless})` : ""}`;
 	}
 }

@@ -4,6 +4,7 @@
 //   PI_HEED_ENV_FILE=... node bench/live/run.ts --reps 3 --parallel 3 [--only S1,S2] [--out bench/live/results.json]
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { snapshot } from "./lib.ts";
 import { dirname, join } from "node:path";
 import { type Result, score, sessionFile, sh } from "./lib.ts";
 import { SCENARIOS, type Scenario } from "./scenarios.ts";
@@ -12,15 +13,21 @@ const reps = Number(arg("reps", "3"));
 /** reps for scenarios where the policy changes mid-session (pi-heed's target) */
 const repsChanging = Number(arg("reps-changing", arg("reps", "3")));
 const model = arg("model", "antigravity/gemini-3.8-flash")!;
-/** condition → environment: "inform" = enforce + rules in the system prompt */
+/**
+ * condition → environment. "inform" = enforce + rules in the system prompt (the 0.8 interpreter). "ledger" = the
+ * main model records rules with heed_record / heed_lift; "ledger+regex" adds the parser's explicit hard rules.
+ */
 const CONDITION_ENV: Record<string, Record<string, string>> = {
 	off: { PI_HEED_MODE: "off" },
-	enforce: { PI_HEED_MODE: "enforce", PI_HEED_INFORM: "0" },
-	inform: { PI_HEED_MODE: "enforce", PI_HEED_INFORM: "1" },
+	enforce: { PI_HEED_MODE: "enforce", PI_HEED_INFORM: "0", PI_HEED_PIPELINE: "interpret" },
+	inform: { PI_HEED_MODE: "enforce", PI_HEED_INFORM: "1", PI_HEED_PIPELINE: "interpret" },
+	interpret: { PI_HEED_MODE: "enforce", PI_HEED_INFORM: "1", PI_HEED_PIPELINE: "interpret" },
+	ledger: { PI_HEED_MODE: "enforce", PI_HEED_INFORM: "1", PI_HEED_PIPELINE: "ledger" },
+	"ledger+regex": { PI_HEED_MODE: "enforce", PI_HEED_INFORM: "1", PI_HEED_PIPELINE: "ledger+regex" },
 };
 const parallel = Number(arg("parallel", "3"));
 const only = arg("only")?.split(",");
-const conditions = (arg("conditions", "off,enforce,inform") as string).split(",");
+const conditions = (arg("conditions", "off,interpret,ledger,ledger+regex") as string).split(",");
 const turnTimeout = Number(arg("timeout", "240")) * 1000;
 const root = arg("root", join(process.env.TMPDIR ?? "/tmp", "pi-heed-live"))!;
 const outPath = arg("out", join(dirname(new URL(import.meta.url).pathname), "results.json"))!;
@@ -83,6 +90,7 @@ async function runJob(job: Job): Promise<Result> {
 	let hangs = 0;
 	let completed = 0;
 	let error: string | undefined;
+	const snapshots: Array<Record<string, string>> = [snapshot(repo)];
 	for (let i = 0; i < job.scenario.turns.length; i++) {
 		let r = await turn(job, repo, job.scenario.turns[i], i === 0);
 		// the print-mode start-up hang happens before pi reads anything; retrying is safe
@@ -95,6 +103,9 @@ async function runJob(job: Job): Promise<Result> {
 			break;
 		}
 		completed++;
+		// what every file looked like after each turn: scoring that does not depend on pi-heed's own classifier
+		snapshots.push(snapshot(repo));
+		writeFileSync(join(job.dir, "snapshots.json"), JSON.stringify(snapshots));
 	}
 	return score(job.scenario, job.condition, job.rep, job.dir, { turnsCompleted: completed, hangs, seconds: Math.round((Date.now() - t0) / 1000), error });
 }
@@ -113,16 +124,22 @@ async function worker() {
 		const r = await runJob(job).catch((e) => ({ scenario: job!.scenario.id, condition: job!.condition, rep: job!.rep, violated: false, succeeded: false, blocked: [], heedDecisions: 0, turnsCompleted: 0, hangs: 0, seconds: 0, error: String(e) }) as Result);
 		results.push(r);
 		writeFileSync(outPath, `${JSON.stringify(results, null, "\t")}\n`);
-		console.log(`${r.scenario} ${r.condition.padEnd(7)} #${r.rep}  violated=${r.violated || "no"}  task=${r.succeeded ? "ok" : "FAIL"}  blocked=${r.blocked.length}  turns=${r.turnsCompleted}  hangs=${r.hangs}  ${r.seconds}s${r.error ? `  ERROR ${r.error}` : ""}`);
+		console.log(
+			`${r.scenario} ${r.condition.padEnd(12)} #${r.rep}  violated=${r.violated || "no"}  task=${r.succeeded ? "ok" : "FAIL"}  blocked=${r.blocked.length}  would=${r.wouldBlock ?? 0}  recorded=${r.recorded ?? 0}${r.registrationMissing ? " MISSING" : ""}  lifts=${r.lifts ?? 0}  turns=${r.turnsCompleted}  ${r.seconds}s${r.error ? `  ERROR ${r.error}` : ""}`,
+		);
 	}
 }
 await Promise.all(Array.from({ length: parallel }, worker));
 
 // summary
-console.log("\nscenario  condition  violations  task ok  blocked calls");
+console.log("\nscenario  condition     violations  task ok  blocked  would-block  recorded  missing");
 for (const s of [...new Set(results.map((r) => r.scenario))].sort()) {
 	for (const c of conditions) {
 		const rs = results.filter((r) => r.scenario === s && r.condition === c && !r.error);
-		console.log(`${s.padEnd(9)} ${c.padEnd(10)} ${`${rs.filter((r) => r.violated).length}/${rs.length}`.padEnd(11)} ${`${rs.filter((r) => r.succeeded).length}/${rs.length}`.padEnd(8)} ${rs.reduce((a, r) => a + r.blocked.length, 0)}`);
+		if (!rs.length) continue;
+		const sum = (f: (r: Result) => number) => rs.reduce((a, r) => a + f(r), 0);
+		console.log(
+			`${s.padEnd(9)} ${c.padEnd(13)} ${`${rs.filter((r) => r.violated).length}/${rs.length}`.padEnd(11)} ${`${rs.filter((r) => r.succeeded).length}/${rs.length}`.padEnd(8)} ${String(sum((r) => r.blocked.length)).padEnd(8)} ${String(sum((r) => r.wouldBlock ?? 0)).padEnd(12)} ${String(sum((r) => r.recorded ?? 0)).padEnd(9)} ${rs.filter((r) => r.registrationMissing).length}`,
+		);
 	}
 }

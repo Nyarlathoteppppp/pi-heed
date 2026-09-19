@@ -30,6 +30,8 @@ export class FakePi {
 	cwd = "/work/project";
 	/** extension tools pi reports as available and active */
 	tools: Array<{ name: string; description: string }> = [];
+	/** tools an extension registered for the model (heed_record / heed_lift) */
+	registered = new Map<string, any>();
 	private seq = 0;
 
 	api(): ExtensionAPI {
@@ -40,6 +42,9 @@ export class FakePi {
 			},
 			registerCommand(name: string, opts: any) {
 				self.commands.set(name, opts);
+			},
+			registerTool(tool: any) {
+				self.registered.set(tool.name, tool);
 			},
 			appendEntry(customType: string, data?: unknown) {
 				self.entries.push({ type: "custom", id: `e${++self.seq}`, customType, data });
@@ -86,6 +91,20 @@ export class FakePi {
 		this.entries.push({ type: "message", id: `e${++this.seq}`, message: { role: "user", content: text } });
 		await this.emit("input", { text, source: "interactive" });
 		await this.emit("agent_start");
+	}
+
+	/** The model calls a registered tool, as pi would: tool_call first (pi-heed may block it), then execute. */
+	async callTool(name: string, params: Record<string, unknown>) {
+		const blocked = await this.emit("tool_call", { toolCallId: `t${++this.seq}`, toolName: name, input: params });
+		if (blocked?.block) return { blocked: true, text: String(blocked.reason) };
+		const r = await this.registered.get(name).execute(`t${this.seq}`, params, this.controller.signal, undefined, this.ctx());
+		return { blocked: false, text: r.content.map((c: any) => c.text).join(""), details: r.details };
+	}
+
+	/** A user-role message another extension injected (pi reports source "extension"). */
+	async injected(text: string) {
+		this.entries.push({ type: "message", id: `e${++this.seq}`, message: { role: "user", content: text } });
+		await this.emit("input", { text, source: "extension" });
 	}
 
 	async command(line: string) {

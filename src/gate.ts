@@ -1,6 +1,6 @@
 import { truncate } from "./actions.ts";
 import { type ChoiceAnswer, type ChoiceQuestion, ask, type Judge } from "./judge.ts";
-import type { Policy, Resolution } from "./policy.ts";
+import { describe, type Policy, type Resolution } from "./policy.ts";
 import type { ToolAction, Verdict } from "./types.ts";
 
 function quoteOf(p: Policy): string {
@@ -129,9 +129,15 @@ export async function judgeCheck(
 	timeoutMs: number,
 	signal?: AbortSignal,
 ): Promise<JudgedCheck> {
-	if (custom.length === 0 || !(action.mutates || action.effect === "unknown")) return { ms: 0 };
+	// Any call that is not a pure read: "never call the production API" is broken by a plain GET.
+	if (custom.length === 0 || action.effect === "read") return { ms: 0 };
 	const state = {
-		user_constraints: custom.map((c) => ({ id: c.id, text: c.resource })),
+		// A rule the model recorded is a noun phrase ("calling the production API"); read as-is, Jev took it for
+		// something allowed and let a POST to it through. As a prohibition: 7/7 (E18).
+		user_constraints: custom.map((c) => {
+			const text = c.provenance.by === "model" ? `Do not: ${c.resource}` : c.resource;
+			return { id: c.id, text: c.unless ? `${text} (except: ${c.unless})` : text };
+		}),
 		pending_tool_call: { tool: action.toolName, summary: action.summary, input: truncate(JSON.stringify(input), 1500) },
 	};
 	const { answers, error, ms } = await ask(judge, state, { q: CUSTOM_QUESTION }, timeoutMs, signal);
@@ -183,3 +189,44 @@ export async function exceptionCheck(
 	if (!answer) return { permitted: false, error, ms };
 	return { permitted: answer.choice === "yes" && probOf(answer) >= 0.9 && answer.confidence >= 0.8, answer, ms };
 }
+
+// A restriction with an exception the user stated ("don't touch the tests unless it only fixes a typo"): does this
+// exact call fall under it? Asked only after the rule itself matched; the answer sets aside that one rule.
+export const UNLESS_QUESTION: ChoiceQuestion = {
+	type: "choice",
+	instructions: "Does `pending_tool_call` fall under `exception`, the case the user excepted from `restriction`?",
+	criteria: {
+		excepted: "Yes: the call is within the exception",
+		not_excepted: "No: the call does more than, or something other than, the exception",
+		unclear: "Cannot tell from the call",
+	},
+};
+
+export interface UnlessCheck {
+	excepted: boolean;
+	answer?: ChoiceAnswer;
+	error?: string;
+	ms: number;
+}
+
+/** Only a confident "excepted" sets the rule aside; no judge, errors and doubt keep it. */
+export async function unlessCheck(
+	judge: Judge | undefined,
+	policy: Policy,
+	action: ToolAction,
+	input: Record<string, unknown>,
+	timeoutMs: number,
+	signal?: AbortSignal,
+): Promise<UnlessCheck> {
+	if (!judge || !policy.unless) return { excepted: false, ms: 0 };
+	const state = {
+		pending_tool_call: { tool: action.toolName, input: truncate(JSON.stringify(input), 2500) },
+		restriction: describe({ ...policy, unless: undefined }),
+		exception: policy.unless,
+	};
+	const { answers, error, ms } = await ask(judge, state, { q: UNLESS_QUESTION }, timeoutMs, signal);
+	const answer = answers?.q as ChoiceAnswer | undefined;
+	if (!answer) return { excepted: false, error, ms };
+	return { excepted: answer.choice === "excepted" && probOf(answer) >= 0.9 && answer.confidence >= 0.8, answer, ms };
+}
+
