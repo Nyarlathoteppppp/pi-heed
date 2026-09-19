@@ -32,7 +32,7 @@ async function replay(file: string) {
 	const lines = readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return undefined; } }).filter(Boolean);
 	const pi = new FakePi();
 	pi.cwd = lines.find((e: any) => e.type === "session")?.cwd ?? "/";
-	const heed = createHeed(pi.api(), { env: { PI_HEED_ENV_FILE: process.env.PI_HEED_ENV_FILE ?? "", PI_HEED_MODE: "enforce", PI_JEV_CONTEXT_MODE: "off" }, judge: undefined, config: { maxInterventionsPerRun: 1e9 } });
+	const heed = createHeed(pi.api(), { env: { PI_HEED_ENV_FILE: process.env.PI_HEED_ENV_FILE ?? "", PI_HEED_MODE: "enforce", PI_HEED_PIPELINE: "interpret", PI_JEV_CONTEXT_MODE: "off" }, judge: undefined, config: { maxInterventionsPerRun: 1e9 } });
 	const events: Event[] = [];
 	let userN = 0, calls = 0, inRun = false;
 	const calledTools = new Map<string, { name: string; input: Record<string, unknown> }>();

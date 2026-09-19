@@ -129,6 +129,7 @@ export function toolCall(toolName: string, input: Record<string, unknown>) {
 
 export function setup(options: HeedOptions = {}) {
 	const pi = new FakePi();
-	const heed = createHeed(pi.api(), { judge: null, env: {}, ...options });
+	// most tests exercise the interpreter; ledger tests pass PI_HEED_PIPELINE themselves
+	const heed = createHeed(pi.api(), { judge: null, ...options, env: { PI_HEED_PIPELINE: "interpret", ...(options.env ?? {}) } });
 	return { pi, heed };
 }

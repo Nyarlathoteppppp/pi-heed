@@ -108,7 +108,7 @@ async function runCase(c: Case, judge: Judge | null): Promise<Decision[]> {
 	const config = { mode: "enforce" as const, maxInterventionsPerRun: 1000, judgeTimeoutMs: 5000 };
 	let pi = new FakePi();
 	pi.tools = c.tools ?? [];
-	let heed = createHeed(pi.api(), { judge, config, env: {} });
+	let heed = createHeed(pi.api(), { judge, config, env: { PI_HEED_PIPELINE: "interpret" } });
 	await pi.emit("session_start", { reason: "startup" });
 	const out: Decision[] = [];
 	let started = false;
@@ -152,7 +152,7 @@ async function runCase(c: Case, judge: Judge | null): Promise<Decision[]> {
 			pi = new FakePi();
 			pi.entries = entries;
 			pi.tools = c.tools ?? [];
-			heed = createHeed(pi.api(), { judge, config, env: {} });
+			heed = createHeed(pi.api(), { judge, config, env: { PI_HEED_PIPELINE: "interpret" } });
 			await pi.emit("session_start", { reason: "resume" });
 		} else {
 			await exec(step.call[0], step.call[1], step.expect);

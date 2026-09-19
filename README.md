@@ -8,7 +8,7 @@ Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effect
 
 [![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1-7c5cff)](https://pi.dev)
 [![Jev](https://img.shields.io/badge/powered%20by-TypeSafe%20Jev-f5a524)](https://docs.typesafe.ai)
-[![tests](https://img.shields.io/badge/tests-165%20passing-2ea043)](#development)
+[![tests](https://img.shields.io/badge/tests-166%20passing-2ea043)](#development)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
@@ -260,8 +260,8 @@ From 0.9 there is a second pipeline, the **ledger**:
 
 Live, same model and scenarios (E19): 0 violations in every condition; false blocks interpreter 3, ledger 1 (fixed
 since), ledger + parser fallback 3, all of the parser conditions' from the parser. The model recorded every rule
-the scenarios stated and nothing where there was none. 0.9 still defaults to the interpreter; the ledger is
-selected with `PI_HEED_PIPELINE=ledger` while it is evaluated.
+the scenarios stated and nothing where there was none. From 0.10 the ledger is the default. The interpreter stays
+selectable (`PI_HEED_PIPELINE=interpret`) for the scripted benchmark and comparison, and will be removed in 1.0.
 
 ## Roadmap
 
@@ -272,7 +272,8 @@ selected with `PI_HEED_PIPELINE=ledger` while it is evaluated.
 - [x] Live benchmark on a second model, and "inform" (E14)
 - [x] Faster labelling (`/heed review`, `/heed label n`)
 - [x] Live benchmark S8–S15 (E19)
-- [ ] Ledger as the default, then remove the interpreter (`understand.ts`, the parser's heuristics)
+- [x] Ledger as the default (0.10)
+- [ ] Remove the interpreter (`understand.ts`, the parser's heuristics) in 1.0
 - [ ] More models and runs for the ledger, especially weaker models that may not record rules
 - [ ] Recalibrate thresholds from labelled real sessions; E05 suggests 0.9 is conservative
 - [ ] Threshold calibration from `/heed label` data

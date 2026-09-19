@@ -322,3 +322,16 @@ describe("ledger: a lasting permission is a lift and gets the same check", () =>
 	});
 });
 
+describe("ledger is the default", () => {
+	it("without PI_HEED_PIPELINE, the model's tools are registered and messages are not parsed", async () => {
+		const { createHeed } = await import("../src/index.ts");
+		const pi = new FakePi();
+		const heed = createHeed(pi.api(), { judge: null, env: { PI_HEED_MODE: "enforce" } });
+		await pi.user("Don't push.");
+		assert.deepEqual(heed.engine.active(), []);
+		assert.ok(pi.registered.has("heed_record") && pi.registered.has("heed_lift"));
+		await pi.command("/heed status");
+		assert.match(pi.notes.at(-1)!, /rules from: the model/);
+	});
+});
+

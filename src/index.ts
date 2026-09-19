@@ -143,10 +143,10 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	const transport = options.judge === undefined ? resolveTransport(env) : undefined;
 	const judge: Judge | undefined = options.judge === undefined ? (transport ? new JevJudge(transport) : undefined) : (options.judge ?? undefined);
 
-	// Evaluation only, not a user setting: how rules come to exist. "interpret" is the 0.8 behaviour (parser + Jev
-	// reading every message); "ledger" leaves understanding to the main model, which records rules with heed_record /
-	// heed_lift; "ledger+regex" adds the parser's explicit hard rules as a fallback.
-	const pipeline: Pipeline = PIPELINES.includes(env.PI_HEED_PIPELINE as Pipeline) ? (env.PI_HEED_PIPELINE as Pipeline) : "interpret";
+	// How rules come to exist. Default "ledger": the main model understands the user and records rules with
+	// heed_record / heed_lift; pi-heed checks the receipts and enforces (E19). Not a user setting: "interpret" (the 0.8
+	// parser + Jev reading every message) and "ledger+regex" stay selectable through the environment for evaluation.
+	const pipeline: Pipeline = PIPELINES.includes(env.PI_HEED_PIPELINE as Pipeline) ? (env.PI_HEED_PIPELINE as Pipeline) : "ledger";
 	const ledger = pipeline !== "interpret";
 
 	const engine = new PolicyEngine();
@@ -665,7 +665,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 				case "status":
 					return say(
 						[
-							`mode: ${config.mode}   judge: ${judge?.name ?? "none (rules only): set envFile in ~/.pi/agent/pi-heed.json"}   interventions this run: ${interventions}/${config.maxInterventionsPerRun}`,
+							`mode: ${config.mode}   rules from: ${ledger ? "the model (heed_record)" : "pi-heed's own reading"}${pipeline === "ledger+regex" ? " + parser" : ""}   judge: ${judge?.name ?? "none: set envFile in ~/.pi/agent/pi-heed.json"}   interventions this run: ${interventions}/${config.maxInterventionsPerRun}`,
 							...engine.active().map((p) => `  ${line(p)}`),
 							...(sub ? [] : ["", HELP]),
 						].join("\n"),
