@@ -189,6 +189,16 @@ Semantic checks need one of:
 - `goal` scope only ends when Jev says a message starts a new task. Without a key it behaves like `session`.
 - The live benchmark so far covers one model (dragon-grok-4.6) and six scenarios.
 
+## Related work
+
+- **[thruwire/foreman](https://github.com/thruwire/foreman)** puts Jev above a Codex worker to supervise a *whole job*:
+  is it done, stuck, off track, in need of verification or a human? A Python policy then continues, steers, stops,
+  retries or finishes. pi-heed works one layer down, inside pi's tool loop: *does this call break a rule the user
+  set?* The two are complementary, and share TypeSafe's principle that code decides and Jev perceives. pi-heed
+  borrowed foreman's retry of 429 / transient 5xx (inside the deadline) and its answer validation. Two of our
+  measurements bear on foreman's open questions: a shared large state can cost a question accuracy (E12), and
+  narrow questions beat broad ones (E09).
+
 ## Roadmap
 
 - [ ] Suggest-only rollback to the last verified checkpoint (with [pi-rewind-hook](https://github.com/nicobailon/pi-rewind-hook))
