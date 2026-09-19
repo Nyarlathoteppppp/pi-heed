@@ -75,6 +75,8 @@ export interface SessionFacts {
 	wouldBlock: number;
 	recorded: number;
 	lifts: number;
+	/** restrictions the parser created (ledger+regex fallback, interpret) */
+	parsed: number;
 	heedDecisions: number;
 	assistantMessages: number;
 	/** assistant messages that ended in a provider error (quota, auth, network) */
@@ -83,7 +85,7 @@ export interface SessionFacts {
 }
 
 export function readSession(dir: string): SessionFacts {
-	const facts: SessionFacts = { models: [], executed: [], blocked: [], wouldBlock: 0, recorded: 0, lifts: 0, heedDecisions: 0, assistantMessages: 0, modelErrors: 0 };
+	const facts: SessionFacts = { models: [], executed: [], blocked: [], wouldBlock: 0, recorded: 0, lifts: 0, parsed: 0, heedDecisions: 0, assistantMessages: 0, modelErrors: 0 };
 	const f = sessionFile(dir);
 	if (!f) return facts;
 	const models = new Set<string>();
@@ -109,6 +111,9 @@ export function readSession(dir: string): SessionFacts {
 			facts.heedDecisions++;
 			if (e.data.acted) facts.blocked.push(`${e.data.summary}  [${e.data.policy ?? e.data.verdict?.by}]`);
 			if (e.data.budgetExhausted) facts.wouldBlock++;
+		}
+		if (e.type === "custom" && e.customType === "heed-policy" && e.data?.kind === "rules") {
+			for (const op of e.data.ops ?? []) if (op.op === "add" && op.spec?.effect !== "ALLOW") facts.parsed++;
 		}
 		if (e.type === "custom" && e.customType === "heed-policy" && e.data?.kind === "model") {
 			for (const op of e.data.ops ?? []) {
@@ -162,7 +167,8 @@ export async function score(
 		wouldBlock: facts.wouldBlock,
 		recorded: facts.recorded,
 		lifts: facts.lifts,
-		registrationMissing: condition.startsWith("ledger") && scenario.expectsRule !== false && facts.recorded === 0,
+		// the scenario states a rule and nothing recorded one: neither the model nor (ledger+regex) the parser
+		registrationMissing: condition.startsWith("ledger") && scenario.expectsRule !== false && facts.recorded === 0 && facts.parsed === 0,
 		turnsCompleted: extra.turnsCompleted,
 		hangs: extra.hangs,
 		seconds: extra.seconds,
