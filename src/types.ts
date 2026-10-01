@@ -52,6 +52,11 @@ export interface HeedConfig {
 	 * identical attempt and asks the model to check with the user; an identical retry goes through. 0 disables.
 	 */
 	bumpProbability: number;
+	/**
+	 * Give Jev the current task (task ledger) with a free-text rule or an `unless` it judges. Off until measured:
+	 * a larger shared state has cost a question accuracy before (E12).
+	 */
+	taskContext: boolean;
 }
 
 export const DEFAULT_CONFIG: HeedConfig = {
@@ -64,4 +69,5 @@ export const DEFAULT_CONFIG: HeedConfig = {
 	repeatThreshold: 2,
 	inform: false,
 	bumpProbability: 0,
+	taskContext: false,
 };

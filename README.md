@@ -8,7 +8,7 @@ Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effect
 
 [![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1-7c5cff)](https://pi.dev)
 [![Jev](https://img.shields.io/badge/powered%20by-TypeSafe%20Jev-f5a524)](https://docs.typesafe.ai)
-[![tests](https://img.shields.io/badge/tests-166%20passing-2ea043)](#development)
+[![tests](https://img.shields.io/badge/tests-184%20passing-2ea043)](#development)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
@@ -212,6 +212,7 @@ key was found.
 /heed policies                   the resolved policy right now
 /heed history                    superseded and expired policies, and why they ended
 /heed explain <id>               which of your sentences a policy came from, its exceptions
+/heed tasks                      the task ledger: tasks, decisions, and the rules set in each
 /heed add <text>                 add a free-text prohibition by hand
 /heed drop <id>|all              remove one rule, or all of them
 /heed log [n]                    recent decisions (with pre-judge / wait times)
@@ -263,6 +264,25 @@ since), ledger + parser fallback 3, all of the parser conditions' from the parse
 the scenarios stated and nothing where there was none. From 0.10 the ledger is the default. The interpreter stays
 selectable (`PI_HEED_PIPELINE=interpret`) for the scripted benchmark and comparison, and will be removed in 1.0.
 
+### Next: an intent/task ledger next to the policy ledger
+
+The ledger moved understanding to the main model, but a policy tuple still has to carry everything the conversation
+meant: *"先看看，确认后再改"* is not a rule, *"use approach B"* is not a rule, and *"this task"* had no object to end
+with. From 0.11 the main model also keeps a **task ledger** with `heed_task`, with the same receipts (the user's
+exact words, in a message they typed):
+
+- `start` a task (a one-line goal), `note` a decision the user made about it, `stage` it as `discuss` (the user
+  wants a plan first) or `execute`, and mark it `done`. The stage is state, not a ban: it is not enforced.
+- Every rule records the task it was set in. `heed_record` scope `task` ends with the task: its permissions when the
+  task is done or replaced; its restrictions only when Jev confirms the next task really is a new one, otherwise
+  they carry over to it.
+- The task, its decisions and its rules go into the system prompt, so the model keeps the user's intent after
+  compaction, and a block names the current task. `PI_HEED_TASK_CONTEXT=1` also gives Jev the task when it judges a
+  free-text rule or an `unless` (off until measured: a larger state has cost accuracy before, E12).
+  `PI_HEED_TASKS=0` turns the task ledger off.
+
+Not measured live yet.
+
 ## Roadmap
 
 - [ ] Suggest-only rollback to the last verified checkpoint (with [pi-rewind-hook](https://github.com/nicobailon/pi-rewind-hook))
@@ -273,6 +293,8 @@ selectable (`PI_HEED_PIPELINE=interpret`) for the scripted benchmark and compari
 - [x] Faster labelling (`/heed review`, `/heed label n`)
 - [x] Live benchmark S8–S15 (E19)
 - [x] Ledger as the default (0.10)
+- [x] Intent/task ledger next to the policy ledger (0.11)
+- [ ] Live runs for the task ledger: does the model keep it, and does task context help Jev's free-text judgements
 - [ ] Remove the interpreter (`understand.ts`, the parser's heuristics) in 1.0
 - [ ] More models and runs for the ledger, especially weaker models that may not record rules
 - [ ] Recalibrate thresholds from labelled real sessions; E05 suggests 0.9 is conservative
@@ -282,7 +304,7 @@ selectable (`PI_HEED_PIPELINE=interpret`) for the scripted benchmark and compari
 
 ```bash
 npm install
-npm test                                        # 122 tests, no network
+npm test                                        # 184 tests, no network
 node bench/run.ts --judge replay                # benchmark, offline
 npm run typecheck
 PI_HEED_ENV_FILE=~/.env npm run smoke:jev       # live Jev check

@@ -9,6 +9,7 @@ import { describe, isRestrictive, plain, type Policy, PolicyEngine, type PolicyO
 import { RepeatTracker } from "./repeat.ts";
 import { mentionedPaths, parseMessage, pastedBody } from "./rules.ts";
 import { DEFAULT_CONFIG, type HeedConfig, type Mode, type ToolAction, type Verdict } from "./types.ts";
+import { describeTask, renderTasks, type Task, TaskLedger, type TaskOp } from "./task.ts";
 import { registerLedgerTools } from "./tools.ts";
 import { understand } from "./understand.ts";
 
@@ -56,6 +57,12 @@ export interface PolicyEntry {
 	source?: "extension";
 }
 
+/** Persisted task-ledger ops, replayed in order with the policy ops. */
+export interface TaskEntry {
+	at: number;
+	ops: TaskOp[];
+}
+
 interface Decision {
 	verdict?: Verdict;
 	policyId?: string;
@@ -78,6 +85,7 @@ const SUBCOMMANDS: Record<string, string> = {
 	policies: "the rules in force right now",
 	history: "lifted and expired rules, and why",
 	explain: "<id>: which of your sentences a rule came from",
+	tasks: "the task ledger: current task, decisions, earlier tasks",
 	mode: "off | shadow | enforce",
 	review: "[n]: recent decisions, numbered",
 	label: "[n] good|bad: mark a decision right or wrong",
@@ -138,6 +146,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		...(envMode && MODES.includes(envMode) ? { mode: envMode } : {}),
 		...(env.PI_HEED_INFORM ? { inform: env.PI_HEED_INFORM === "1" } : {}),
 		...(env.PI_HEED_BUMP ? { bumpProbability: Number(env.PI_HEED_BUMP) || 0 } : {}),
+		...(env.PI_HEED_TASK_CONTEXT ? { taskContext: env.PI_HEED_TASK_CONTEXT === "1" } : {}),
 	};
 	const config: HeedConfig = { ...DEFAULT_CONFIG, ...envFlags, ...options.config };
 	const transport = options.judge === undefined ? resolveTransport(env) : undefined;
@@ -148,6 +157,9 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	// parser + Jev reading every message) and "ledger+regex" stay selectable through the environment for evaluation.
 	const pipeline: Pipeline = PIPELINES.includes(env.PI_HEED_PIPELINE as Pipeline) ? (env.PI_HEED_PIPELINE as Pipeline) : "ledger";
 	const ledger = pipeline !== "interpret";
+	// The intent/task ledger next to the policy ledger (task.ts). Part of the ledger pipeline; PI_HEED_TASKS=0 turns it off.
+	const tasksOn = ledger && env.PI_HEED_TASKS !== "0";
+	const tasks = new TaskLedger();
 
 	const engine = new PolicyEngine();
 	const repeat = new RepeatTracker(config.repeatThreshold);
@@ -205,6 +217,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 
 	function rebuild(ctx: ExtensionContext) {
 		engine.reset();
+		tasks.reset();
 		repeat.reset();
 		pending.clear();
 		speculative.clear();
@@ -228,6 +241,8 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 				if (!parsed.has(at)) applyOps(parseFor(text, at));
 			} else if (entry.type === "custom" && entry.customType === "heed-policy") {
 				applyOps((entry.data as PolicyEntry).ops ?? []);
+			} else if (entry.type === "custom" && entry.customType === "heed-task") {
+				for (const op of (entry.data as TaskEntry).ops ?? []) tasks.apply(op);
 			} else if (entry.type === "custom" && entry.customType === "heed-constraint") {
 				applyOps(legacyOps(entry.data ?? {}, userMessages.length));
 			} else if (entry.type === "custom" && entry.customType === "heed-config" && MODES.includes(entry.data?.mode)) {
@@ -276,6 +291,12 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		return { verdict, policyId: p.id, exception, error: x.error === "no judge configured" ? undefined : x.error, ms: x.ms };
 	}
 
+	/** The current task for Jev, when PI_HEED_TASK_CONTEXT=1. */
+	function taskContext(): { goal: string; decisions: string[] } | undefined {
+		const t: Task | undefined = config.taskContext && tasksOn ? tasks.current() : undefined;
+		return t ? { goal: truncate(t.goal, 200), decisions: t.decisions.slice(-5).map((d) => truncate(d.text, 120)) } : undefined;
+	}
+
 	/** Full gate decision: resolved policy state first, then Jev for free-text prohibitions. */
 	async function decide(action: ToolAction, input: Record<string, unknown>, signal?: AbortSignal): Promise<Decision> {
 		// A rule with an `unless` the call meets is set aside on its own; whatever else applies still decides.
@@ -284,7 +305,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 			const r = engine.resolve(action, satisfied, cwd, exempt);
 			if (!r.policy) break;
 			if (!r.policy.unless) return restrictiveDecision(r, action, signal);
-			const x = await unlessCheck(judge, r.policy, action, input, config.judgeTimeoutMs, signal);
+			const x = await unlessCheck(judge, r.policy, action, input, config.judgeTimeoutMs, signal, taskContext());
 			if (!x.excepted) {
 				const d = await restrictiveDecision(r, action, signal);
 				return { ...d, ms: d.ms + x.ms, error: d.error ?? x.error };
@@ -294,10 +315,10 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		const custom = await relevantCustom(engine.customDenies(), action.toolName);
 		if (custom.length === 0 && exempt.size) return { ms: 0, exempted: [...exempt] };
 		if (custom.length === 0) return { ms: 0 };
-		const key = JSON.stringify([custom.map((c) => c.id), action.toolName, input]);
+		const key = JSON.stringify([custom.map((c) => c.id), action.toolName, input, taskContext()?.goal]);
 		let hit = memo.get(key);
 		if (!hit) {
-			hit = judgeCheck(judge, custom, action, input, config.judgeTimeoutMs, signal).then((j) => {
+			hit = judgeCheck(judge, custom, action, input, config.judgeTimeoutMs, signal, taskContext()).then((j) => {
 				if (!j.verdict) memo.delete(key); // never cache failures
 				return j;
 			});
@@ -347,7 +368,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	 * rule is active ("never call the production API" is broken by a plain GET). pi-heed's own tools never.
 	 */
 	function checkable(action: ToolAction): boolean {
-		if (action.toolName === "heed_record" || action.toolName === "heed_lift") return false;
+		if (action.toolName === "heed_record" || action.toolName === "heed_lift" || action.toolName === "heed_task") return false;
 		return action.mutates || action.effect === "unknown" || (!!action.reachesOut && engine.customDenies().length > 0);
 	}
 
@@ -406,10 +427,11 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		}
 		interventions++;
 		status(ctx, `blocked ${action.toolName}`);
+		const task = tasksOn ? tasks.current() : undefined;
 		const remedy =
-			ledger && policyId
+			(ledger && policyId
 				? ` If the user has since lifted rule ${policyId}, call heed_lift with it and their exact words; if they gave a one-off permission, heed_record an allow. Otherwise ask the user.`
-				: "";
+				: "") + (task ? ` Current task ${task.id}: ${truncate(task.goal, 160)}. If the task needs this, tell the user it conflicts with their rule.` : "");
 		return { block: true, reason: `[pi-heed] ${verdict!.evidence}${remedy}` };
 	}
 
@@ -424,6 +446,16 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 			affectedBy: (spec) => engine.affectedBy(spec),
 			commit: (ops) => {
 				const lines = commit({ kind: "model", at: userMessages.length - 1, ops });
+				if (lines.length && config.mode !== "off") log({ kind: "constraint", acted: false, constraints: lines });
+				return lines;
+			},
+			tasks: tasksOn ? tasks : undefined,
+			active: () => engine.active(),
+			commitTask: (taskOps, policyOps) => {
+				const at = userMessages.length - 1;
+				const taskLines = taskOps.flatMap((op) => tasks.apply(op));
+				if (taskOps.length) pi.appendEntry<TaskEntry>("heed-task", { at, ops: taskOps });
+				const lines = [...taskLines, ...commit({ kind: "model", at, ops: policyOps })];
 				if (lines.length && config.mode !== "off") log({ kind: "constraint", acted: false, constraints: lines });
 				return lines;
 			},
@@ -482,17 +514,27 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 
 	// Tell the model the rules up front, so it doesn't have to find them by being blocked. The block is derived from
 	// the policy state only, so the system prompt changes (and the provider cache resets) only when the policy does.
+	// The task ledger is the main model's own record, shown by default in the ledger pipeline: it is what lets the model
+	// keep the user's intent across compaction without pi-heed re-reading the conversation.
 	pi.on("before_agent_start", (event) => {
-		if (config.mode === "off" || !config.inform) return;
-		const active = engine.active();
-		if (!active.length) return;
-		const lines = active.map((p) => `- [${p.id}] ${plain(p)}. The user said: "${truncate(p.sourceQuote, 160)}"`);
-		return {
-			systemPrompt:
-				`${event.systemPrompt}\n\n## Rules the user set in this conversation\n` +
+		if (config.mode === "off") return;
+		let systemPrompt = event.systemPrompt;
+		const taskState = tasksOn ? renderTasks(tasks, (id) => (config.inform ? [] : engine.active().filter((p) => p.task === id).map((p) => `[${p.id}] ${plain(p)}`))) : "";
+		if (taskState) {
+			systemPrompt +=
+				"\n\n## The user's task (pi-heed task ledger)\n" +
+				"You keep this with heed_task; it survives context compaction. Update it when the user changes what they want.\n" +
+				taskState;
+		}
+		const active = config.inform ? engine.active() : [];
+		if (active.length) {
+			const lines = active.map((p) => `- [${p.id}] ${plain(p)}${p.task ? ` [${p.task}]` : ""}. The user said: "${truncate(p.sourceQuote, 160)}"`);
+			systemPrompt +=
+				"\n\n## Rules the user set in this conversation\n" +
 				"These come from the user's own messages. Tool calls that break them are stopped before they run; if a rule is in the way, ask the user.\n" +
-				lines.join("\n"),
-		};
+				lines.join("\n");
+		}
+		return systemPrompt === event.systemPrompt ? undefined : { systemPrompt };
 	});
 
 	pi.on("agent_start", () => {
@@ -679,6 +721,22 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 					const h = engine.history();
 					return say(h.length ? h.map((p) => `${line(p)}  [${p.status}: ${p.provenance.endReason ?? ""}]`).join("\n") : "no superseded or expired policies");
 				}
+				case "tasks": {
+					if (!tasksOn) return say("the task ledger is off (ledger pipeline only; PI_HEED_TASKS=0 turns it off)");
+					const all = tasks.all();
+					if (!all.length) return say("no tasks recorded yet");
+					return say(
+						all
+							.map((t) =>
+								[
+									`${describeTask(t)}  ← #${t.at}: "${truncate(t.quote, 80)}"${t.endReason ? `  [${t.endReason}]` : ""}`,
+									...t.decisions.map((d) => `  decided: ${d.text}  ← #${d.at}: "${truncate(d.quote, 60)}"`),
+									...engine.all().filter((p) => p.task === t.id).map((p) => `  ${p.status === "active" ? "" : `(${p.status}) `}${line(p)}`),
+								].join("\n"),
+							)
+							.join("\n"),
+					);
+				}
 				case "explain": {
 					const p = engine.get(arg);
 					if (!p) return say(`usage: /heed explain <policy id>  (see /heed policies)`, "warning");
@@ -764,6 +822,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	return {
 		config,
 		engine,
+		tasks,
 		repeat,
 		/** Resolves when the latest background understanding pass is applied (tests, benchmark). */
 		settled: () => understanding ?? Promise.resolve(),
