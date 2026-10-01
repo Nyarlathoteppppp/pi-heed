@@ -57,6 +57,12 @@ export interface HeedConfig {
 	 * a larger shared state has cost a question accuracy before (E12).
 	 */
 	taskContext: boolean;
+	/**
+	 * Before blocking a call in enforce mode, ask the human (pi's dialog, TUI or RPC) whether to block it, let it
+	 * through once, or let it through and drop the rule. 0 disables; otherwise the dialog's timeout in ms, after which
+	 * the call is blocked as before. Without a UI (print / json mode) pi-heed blocks without asking.
+	 */
+	askTimeoutMs: number;
 }
 
 export const DEFAULT_CONFIG: HeedConfig = {
@@ -70,4 +76,5 @@ export const DEFAULT_CONFIG: HeedConfig = {
 	inform: false,
 	bumpProbability: 0,
 	taskContext: false,
+	askTimeoutMs: 60_000,
 };

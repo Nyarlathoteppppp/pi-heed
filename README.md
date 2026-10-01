@@ -8,7 +8,7 @@ Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effect
 
 [![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1-7c5cff)](https://pi.dev)
 [![Jev](https://img.shields.io/badge/powered%20by-TypeSafe%20Jev-f5a524)](https://docs.typesafe.ai)
-[![tests](https://img.shields.io/badge/tests-184%20passing-2ea043)](#development)
+[![tests](https://img.shields.io/badge/tests-192%20passing-2ea043)](#development)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
@@ -170,16 +170,22 @@ Reads (`read`, `grep`, `find`, `ls`, non-mutating shell) are never checked.
 ```bash
 export PI_HEED_INFORM=1   # write the active rules into the system prompt (in the live benchmark: half the forbidden attempts, n=5)
 export PI_HEED_BUMP=0.7   # an unsure free-text violation stops the first attempt and asks the model to check with you in chat
+export PI_HEED_ASK=0      # don't ask before blocking (default: ask, 60 s; a number sets the timeout in ms)
 ```
 
-Both are off by default until there is more data. There are no dialogs: pi-heed talks to the model, and the model
-talks to you.
+`inform` and `bump` are off by default until there is more data.
+
+**Before a block, pi-heed asks you** (enforce mode, TUI or RPC): *Block it*, *Allow this call once*, or *Allow, and
+drop rule pN*. A rule that has gone stale is hard to remove from the model's side (lifting takes your words and Jev's
+agreement); you can end it with one keypress. No answer within the timeout, Esc, or no UI (print / json mode): the
+block stands and the model is told, as before. `"ask": false` in `~/.pi/agent/pi-heed.json` also turns it off.
 
 ## Safety properties
 
 - **Shadow by default.** `off` · `shadow` · `enforce`, persisted per session.
 - **Fails open.** Jev error or timeout (2.5 s) → pi behaves as if pi-heed weren't installed.
 - **Never starts a turn.** It blocks a call or annotates a result; it never re-prompts the model. Esc stays Esc.
+- **Asks before it blocks.** You can let a call through or drop the rule; silence blocks.
 - **Stale-proof.** A verdict that lands after you pressed Esc or sent a new prompt is discarded.
 - **Budgeted.** At most 3 interventions per agent run.
 - **Only your words count.** Text injected by extensions (including pi-heed) never becomes a constraint.
@@ -304,7 +310,7 @@ Not measured live yet.
 
 ```bash
 npm install
-npm test                                        # 184 tests, no network
+npm test                                        # 192 tests, no network
 node bench/run.ts --judge replay                # benchmark, offline
 npm run typecheck
 PI_HEED_ENV_FILE=~/.env npm run smoke:jev       # live Jev check
