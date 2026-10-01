@@ -40,6 +40,8 @@ export interface Policy {
 	until?: "go_ahead";
 	/** A semantic exception to this restriction ("unless it only fixes a typo"): Jev judges it on the full call. */
 	unless?: string;
+	/** The task (task ledger) it was set in. With scope "goal" it ends with that task. */
+	task?: string;
 	provenance: Provenance;
 }
 
@@ -52,6 +54,7 @@ export interface PolicySpec {
 	prerequisite?: Prerequisite;
 	until?: "go_ahead";
 	unless?: string;
+	task?: string;
 	by: Provenance["by"];
 	at: number;
 }
@@ -66,10 +69,21 @@ export type PolicyOp =
 	| { op: "supersede"; id: string; reason: string; by: Provenance["by"] }
 	/** Change the scope of a policy (Jev: "this permission is only for this time"). */
 	| { op: "rescope"; id: string; scope: Scope; by: Provenance["by"] }
+	/** Rules of one task carry over to the next (the user did not clearly move on). */
+	| { op: "retask"; from: string; to: string }
 	/** A once-permission was used. */
 	| { op: "use"; id: string }
 	/** The run or goal ended: expire policies with that scope. */
-	| { op: "end"; scope: "run" | "goal"; /** only policies from messages before this index */ before?: number };
+	| {
+			op: "end";
+			scope: "run" | "goal";
+			/** only policies from messages before this index */
+			before?: number;
+			/** only policies set in this task */
+			task?: string;
+			/** only permissions: a task that ends takes its permissions with it, its restrictions need more (tools.ts) */
+			allowsOnly?: boolean;
+	  };
 
 export interface Resolution {
 	/** The deciding policy, when one applies. */
@@ -171,13 +185,26 @@ export class PolicyEngine {
 				p.scope = op.scope;
 				return [`~${p.id} scope ${from} → ${op.scope}`];
 			}
+			case "retask":
+				return this.active()
+					.filter((p) => p.task === op.from && p.scope === "goal")
+					.map((p) => {
+						p.task = op.to;
+						return `~${p.id} task ${op.from} → ${op.to}`;
+					});
 			case "use": {
 				const p = this.get(op.id);
 				return p?.status === "active" && p.scope === "once" ? [this.end(p, "expired", "used once")] : [];
 			}
 			case "end":
 				return this.active()
-					.filter((p) => p.scope === op.scope && (op.before === undefined || p.provenance.at < op.before))
+					.filter(
+						(p) =>
+							p.scope === op.scope &&
+							(op.before === undefined || p.provenance.at < op.before) &&
+							(op.task === undefined || p.task === op.task) &&
+							!(op.allowsOnly && isRestrictive(p)),
+					)
 					.map((p) => this.end(p, "expired", `${op.scope} ended`));
 		}
 	}
@@ -222,6 +249,7 @@ export class PolicyEngine {
 			...(spec.prerequisite ? { prerequisite: spec.prerequisite } : {}),
 			...(spec.until ? { until: spec.until } : {}),
 			...(spec.unless ? { unless: spec.unless } : {}),
+			...(spec.task ? { task: spec.task } : {}),
 			provenance: { at: spec.at, seq: this.seq, by: spec.by },
 		};
 		// A restriction on exactly this (re-apply), or a newer restriction of another kind, replaces
@@ -335,18 +363,22 @@ const ACTION_TEXT: Record<PolicyAction, string> = {
 	custom: "",
 };
 
+function scopeText(p: Policy): string {
+	return p.scope === "goal" && p.task ? `task ${p.task}` : p.scope;
+}
+
 export function describe(p: Policy): string {
 	const unless = p.unless ? ` unless "${p.unless}"` : "";
-	if (p.action === "custom") return `${p.effect} "${p.resource}"${unless} (${p.scope})`;
+	if (p.action === "custom") return `${p.effect} "${p.resource}"${unless} (${scopeText(p)})`;
 	const what = p.action === "modify" ? `modify ${p.resource === "*" ? "anything" : p.resource}` : ACTION_TEXT[p.action];
 	const pre = p.prerequisite ? ` unless ${p.prerequisite} ran first` : "";
-	return `${p.effect} ${what}${pre}${unless} (${p.scope})`;
+	return `${p.effect} ${what}${pre}${unless} (${scopeText(p)})`;
 }
 
 /** Plain-language line for the system prompt: what the model may or may not do, in the user's own words. */
 export function plain(p: Policy): string {
 	const where = (r: string) => (r === "*" ? "files" : r === "tests" ? "test files" : r);
-	const scope = p.scope === "once" ? " (this once)" : p.scope === "run" ? " (for this request)" : "";
+	const scope = p.scope === "once" ? " (this once)" : p.scope === "run" ? " (for this request)" : p.scope === "goal" && p.task ? ` (for task ${p.task})` : "";
 	switch (p.effect) {
 		case "ALLOW":
 			return `Allowed: ${p.action === "modify" ? `modify ${where(p.resource)}` : p.action.replace("_", " ")}${scope}`;

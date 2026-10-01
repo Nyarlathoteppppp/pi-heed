@@ -110,6 +110,12 @@ export async function toolRelevance(
 	return cannot;
 }
 
+/** What the user is working on (task ledger), for judgements that depend on it. Opt-in: PI_HEED_TASK_CONTEXT=1. */
+export interface TaskContext {
+	goal: string;
+	decisions: string[];
+}
+
 export interface JudgedCheck {
 	verdict?: Verdict;
 	error?: string;
@@ -128,6 +134,7 @@ export async function judgeCheck(
 	input: Record<string, unknown>,
 	timeoutMs: number,
 	signal?: AbortSignal,
+	task?: TaskContext,
 ): Promise<JudgedCheck> {
 	// Any call that is not a pure read: "never call the production API" is broken by a plain GET.
 	if (custom.length === 0 || action.effect === "read") return { ms: 0 };
@@ -139,6 +146,8 @@ export async function judgeCheck(
 			return { id: c.id, text: c.unless ? `${text} (except: ${c.unless})` : text };
 		}),
 		pending_tool_call: { tool: action.toolName, summary: action.summary, input: truncate(JSON.stringify(input), 1500) },
+		// last, so Jev reads the rule and the call first (E05: it anchors on what it reads first)
+		...(task ? { user_task: task } : {}),
 	};
 	const { answers, error, ms } = await ask(judge, state, { q: CUSTOM_QUESTION }, timeoutMs, signal);
 	const answer = answers?.q as ChoiceAnswer | undefined;
@@ -217,12 +226,14 @@ export async function unlessCheck(
 	input: Record<string, unknown>,
 	timeoutMs: number,
 	signal?: AbortSignal,
+	task?: TaskContext,
 ): Promise<UnlessCheck> {
 	if (!judge || !policy.unless) return { excepted: false, ms: 0 };
 	const state = {
 		pending_tool_call: { tool: action.toolName, input: truncate(JSON.stringify(input), 2500) },
 		restriction: describe({ ...policy, unless: undefined }),
 		exception: policy.unless,
+		...(task ? { user_task: task } : {}),
 	};
 	const { answers, error, ms } = await ask(judge, state, { q: UNLESS_QUESTION }, timeoutMs, signal);
 	const answer = answers?.q as ChoiceAnswer | undefined;
