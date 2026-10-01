@@ -31,6 +31,23 @@ S5 and S7–S12 are *changing-policy* scenarios; S1–S4 and S6 state one rule t
 
 ## Results
 
+### Run 4: task ledger pilot, `antigravity/gemini-3.8-flash` (0.12.1)
+
+2026-10-01. Four runs, one each of S5, S7, S13 and S15, ledger/enforce with inform enabled, Jev `jev-latest` on
+TypeSafe's API. All four completed with no violations and no blocks. The model called `heed_task` in all four;
+S13 recorded discuss, changed to execute after the user's go-ahead, then marked the task done.
+`results.v0121-gemini.json` contains the filesystem-scored outcomes.
+
+Pi 0.99.1 loaded the checkout's extension explicitly with `-e`; other extensions were disabled except the
+Antigravity provider. Skills, context files and prompt templates were disabled. Thinking was low.
+Task context for Jev stayed off. With one run per scenario and no off comparison, this verifies integration
+and task recording, not a measured improvement in prevention or Jev accuracy.
+
+The human-approval flow was also exercised through real Pi RPC with this model in three isolated sessions.
+An automated client chose block, allow once, and allow-and-drop respectively: block left the file unchanged,
+allow once changed it and kept the rule, and drop changed it and persisted a supersede operation. Regression
+tests cover repeated rejection after the advice budget, stale dialog answers and attempts to restore dropped rules.
+
 ### Run 3: ledger vs interpreter, `gemini-3.8-flash` (0.9, see E19)
 
 81 runs, all usable, conditions `interpret` / `ledger` / `ledger+regex` (and `off` for S13–S15). No condition broke

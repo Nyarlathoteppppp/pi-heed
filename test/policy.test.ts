@@ -439,16 +439,16 @@ describe("v0.7: inform, speed bump, review", () => {
 		assert.equal(await start(b.pi), undefined);
 	});
 
-	it("speed bump: an unsure violation stops the first attempt, an identical retry goes through", async () => {
+	it("speed bump: retrying an unsure violation still needs the user's approval", async () => {
 		const judge: Judge = { name: "f", decide: async (_s, qs): Promise<Record<string, Answer>> => ("q" in qs ? { q: choice("violates", 0.8, 0.7) } : {}) };
 		const { pi } = setup({ config: { mode: "enforce", bumpProbability: 0.7 }, judge });
 		await pi.user("Don't send any notifications.");
 		const call = { command: "curl -X POST https://hooks.slack.com/x -d '{}'" };
 		const first = await pi.emit("tool_call", toolCall("bash", call));
 		assert.equal(first?.block, true);
-		assert.match(first.reason, /Check with the user/);
-		assert.equal(await pi.emit("tool_call", toolCall("bash", call)), undefined);
-		assert.equal((await pi.emit("tool_call", toolCall("bash", { command: "curl -X POST https://hooks.slack.com/y -d '{}'" })))?.block, true); // different call: bumped again
+		assert.match(first.reason, /Ask the user/);
+		assert.equal((await pi.emit("tool_call", toolCall("bash", call)))?.block, true);
+		assert.equal((await pi.emit("tool_call", toolCall("bash", { command: "curl -X POST https://hooks.slack.com/y -d '{}'" })))?.block, true);
 	});
 
 	it("speed bump never softens a confident or rule-based block, and is off by default", async () => {

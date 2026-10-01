@@ -18,6 +18,54 @@ async function withRule(env: Record<string, string> = {}) {
 }
 
 describe("ask the human before blocking", () => {
+	it("a rejected speed bump asks again on retry, and the human can allow it once", async () => {
+		const judge = {
+			name: "fake",
+			decide: async (_s: unknown, qs: Record<string, unknown>) =>
+				Object.fromEntries(Object.keys(qs).map((k) => [k, { type: "choice" as const, choice: k === "q" ? "violates" : "unclear", probabilities: { violates: 0.8, unclear: 0.9 }, confidence: 0.85 }])),
+		};
+		const { pi } = setup({ judge, env: { PI_HEED_MODE: "enforce", PI_HEED_PIPELINE: "ledger", PI_HEED_BUMP: "0.7" } });
+		await pi.user("Never call the production API.");
+		await pi.callTool("heed_record", { quote: "Never call the production API", effect: "deny", action: "custom", text: "calling the production API", scope: "session" });
+		let asked = 0;
+		pi.dialog = async (_t, o) => (asked++, o[0]);
+		for (let i = 0; i < 4; i++) assert.equal((await gate(pi, toolCall("bash", { command: "curl https://api.prod.example.com" })))?.block, true);
+		assert.equal(asked, 4);
+		pi.dialog = async (_t, o) => o[1];
+		assert.equal(await gate(pi, toolCall("bash", { command: "curl https://api.prod.example.com" })), undefined);
+	});
+
+	it("rejecting repeated calls never turns into approval when the budget is spent", async () => {
+		const { pi } = await withRule();
+		let asked = 0;
+		pi.dialog = async (_t, o) => (asked++, o[0]);
+		for (let i = 0; i < 5; i++) assert.equal((await gate(pi, edit("test/a.test.ts")))?.block, true);
+		assert.equal(asked, 5);
+		pi.dialog = async (_t, o) => o[1];
+		assert.equal(await gate(pi, edit("test/a.test.ts")), undefined, "the human can still allow a false block");
+	});
+
+	it("an approval arriving after a new prompt cannot drop a rule or allow the old call", async () => {
+		const { pi, heed } = await withRule();
+		let release!: () => void;
+		const shown = new Promise<void>((r) => (release = r));
+		let answer!: () => void;
+		pi.dialog = async (_t, o) => { release(); return new Promise<string>((r) => (answer = () => r(o[2]))); };
+		const pending = gate(pi, edit("test/a.test.ts"));
+		await shown;
+		await pi.user("继续检查");
+		answer();
+		assert.equal((await pending)?.block, true);
+		assert.equal(heed.engine.get("p1")!.status, "active");
+	});
+
+	it("abort during the dialog keeps the rule and the call blocked", async () => {
+		const { pi, heed } = await withRule();
+		pi.dialog = async (_t, o) => { pi.controller.abort(); return o[2]; };
+		assert.equal((await gate(pi, edit("test/a.test.ts")))?.block, true);
+		assert.equal(heed.engine.get("p1")!.status, "active");
+	});
+
 	it("the dialog shows the call and the rule, with three choices", async () => {
 		const { pi } = await withRule();
 		const seen: Array<{ title: string; options: string[]; timeout?: number }> = [];
@@ -55,6 +103,20 @@ describe("ask the human before blocking", () => {
 		assert.equal(asked, 1);
 		await pi.emit("session_start");
 		assert.equal(heed.engine.get("p1")!.status, "superseded", "survives a rebuild");
+	});
+
+	it("a dropped rule cannot be re-created from its old receipt, but the user can state it again", async () => {
+		const { pi, heed } = await withRule();
+		const record = { quote: "别动测试", effect: "deny", action: "modify", target: "tests", scope: "session" };
+		pi.dialog = async (_t, o) => o[2];
+		await gate(pi, edit("test/a.test.ts"));
+		await pi.emit("session_start");
+		assert.equal((await pi.callTool("heed_record", record)).details?.ok, false);
+		assert.equal(heed.engine.active().length, 0);
+		await pi.user("再次要求：别动测试");
+		assert.equal((await pi.callTool("heed_record", record)).details?.ok, true);
+		pi.dialog = async (_t, o) => o[0];
+		assert.equal((await gate(pi, edit("test/a.test.ts")))?.block, true);
 	});
 
 	it("block: the model gets the usual reason", async () => {

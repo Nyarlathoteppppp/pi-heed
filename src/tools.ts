@@ -18,6 +18,9 @@ export interface LedgerHost {
 	policy(id: string): Policy | undefined;
 	/** Restrictions a lasting permission would end or carve into. */
 	affectedBy(spec: Pick<PolicySpec, "action" | "resource">): Policy[];
+	/** A permission from the same receipt, even if it has ended. */
+	permissionFromReceipt(spec: Pick<PolicySpec, "action" | "resource" | "at">): Policy | undefined;
+	droppedRuleFromReceipt(spec: Pick<PolicySpec, "action" | "resource" | "at">): Policy | undefined;
 	/** Applies and persists ops, returns the engine's lines. */
 	commit(ops: PolicyOp[]): string[];
 	/** The task ledger; undefined when it is turned off (PI_HEED_TASKS=0). */
@@ -149,11 +152,22 @@ export function registerLedgerTools(pi: ExtensionAPI, host: LedgerHost) {
 				...(params.unless ? { unless: squash(params.unless) } : {}),
 				...(task ? { task: task.id } : {}),
 			};
+			if (spec.effect === "ALLOW") {
+				const newer = host.affectedBy(spec).find((p) => p.provenance.at > at);
+				if (newer) return result(`Not recorded: rule ${newer.id} is newer than this permission's receipt. Quote the user's later permission, or ask them.`, { ok: false });
+				const prior = host.permissionFromReceipt(spec);
+				if (prior) {
+					if (prior.status === "active") return result(`Already recorded as ${prior.id}; the same receipt does not grant another permission.`, { ok: true, lines: [] });
+					return result(`Not recorded: this receipt's permission ${prior.id} already ended (${prior.provenance.endReason ?? prior.status}). Quote a new permission from the user, or ask them.`, { ok: false });
+				}
+			} else {
+				const dropped = host.droppedRuleFromReceipt(spec);
+				if (dropped) return result(`Not recorded: the user dropped rule ${dropped.id}. Its old receipt cannot restore it; quote a newer instruction if they set it again.`, { ok: false });
+			}
 			// A lasting permission against a rule loosens it for good: the same check as heed_lift, or it would be a way
 			// around it. A once / run permission is bounded and needs only the receipt.
 			if (spec.effect === "ALLOW" && (spec.scope === "session" || spec.scope === "goal")) {
 				for (const q of host.affectedBy(spec)) {
-					if (q.provenance.at > at) continue; // the rule is newer than the permission's words
 					// a carve-out ("src/api 可以改" under "src 不能改") takes back only the carved part: ask about that part
 					const part = q.resource === spec.resource && q.action === spec.action ? q : { ...q, action: spec.action, resource: spec.resource };
 					const t = await takesBack(host, part, host.messages()[at], signal);

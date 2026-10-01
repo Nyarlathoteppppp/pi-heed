@@ -173,8 +173,6 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	const pending = new Map<string, ToolAction>();
 	const speculative = new Map<string, { inputKey: string; decision: Promise<Decision | undefined>; early: boolean; path?: string }>();
 	const memo = new Map<string, Promise<Decision>>();
-	/** Speed-bumped calls (policy ids + tool + input): an identical retry goes through. */
-	const bumped = new Set<string>();
 	/** Per free-text policy: tools Jev is confident cannot break it. Asked once, in one request, per policy. */
 	const relevance = new Map<string, Promise<Record<string, boolean>>>();
 	let understanding: Promise<void> | undefined;
@@ -402,31 +400,27 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		const blockable =
 			verdict?.decision === "violates" &&
 			(verdict.by === "rule" || (verdict.probability >= config.blockProbability && verdict.confidence >= config.blockConfidence));
-		// Speed bump: unsure but likely. Stop the first attempt and ask the model to check with the user in the chat
-		// (no dialog); an identical retry means the model decided it is fine, and goes through.
+		// Speed bump: unsure but likely. The human can override it; a retry is not approval.
 		const bump =
 			!blockable && verdict?.decision === "violates" && verdict.by === "jev" && config.bumpProbability > 0 && verdict.probability >= config.bumpProbability;
 		if (bump) {
-			const key = JSON.stringify([policyId ?? "custom", action.summary]);
-			const first = !bumped.has(key);
-			const act = first && canIntervene();
-			log({ ...base, acted: act, note: first ? "speed bump" : "speed bump: identical retry allowed" });
+			const act = config.mode === "enforce";
+			log({ ...base, acted: act, note: "speed bump" });
 			if (!act) return;
-			bumped.add(key);
 			interventions++;
 			status(ctx, `bump ${action.toolName}`);
 			return {
 				block: true,
 				reason:
 					`[pi-heed] This call may conflict with what the user asked (p=${verdict!.probability.toFixed(2)}). ${verdict!.evidence} ` +
-					"Check with the user in your reply before doing this. If the user already approved it, repeat the exact same call and it will go through.",
+					"Ask the user before doing this. Retrying the call does not grant permission.",
 			};
 		}
-		const act = blockable && canIntervene();
-		log({ ...base, acted: act, budgetExhausted: blockable && config.mode === "enforce" && !act });
+		const act = blockable && config.mode === "enforce";
+		log({ ...base, acted: act });
 		if (!blockable) return;
 		if (!act) {
-			status(ctx, config.mode === "shadow" ? `would block ${action.toolName}` : "budget spent");
+			status(ctx, `would block ${action.toolName}`);
 			return;
 		}
 		interventions++;
@@ -448,6 +442,8 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 			injected: () => injected,
 			policy: (id) => engine.get(id),
 			affectedBy: (spec) => engine.affectedBy(spec),
+			permissionFromReceipt: (spec) => engine.permissionFromReceipt(spec),
+			droppedRuleFromReceipt: (spec) => engine.droppedRuleFromReceipt(spec),
 			commit: (ops) => {
 				const lines = commit({ kind: "model", at: userMessages.length - 1, ops });
 				if (lines.length && config.mode !== "off") log({ kind: "constraint", acted: false, constraints: lines });
@@ -750,7 +746,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 				case "status":
 					return say(
 						[
-							`mode: ${config.mode}   rules from: ${ledger ? "the model (heed_record)" : "pi-heed's own reading"}${pipeline === "ledger+regex" ? " + parser" : ""}   judge: ${judge?.name ?? "none: set envFile in ~/.pi/agent/pi-heed.json"}   interventions this run: ${interventions}/${config.maxInterventionsPerRun}`,
+							`mode: ${config.mode}   rules from: ${ledger ? "the model (heed_record)" : "pi-heed's own reading"}${pipeline === "ledger+regex" ? " + parser" : ""}   judge: ${judge?.name ?? "none: set envFile in ~/.pi/agent/pi-heed.json"}   interventions this run: ${interventions} (advice stops at ${config.maxInterventionsPerRun}; blocks still require approval)`,
 							...engine.active().map((p) => `  ${line(p)}`),
 							...(sub ? [] : ["", HELP]),
 						].join("\n"),

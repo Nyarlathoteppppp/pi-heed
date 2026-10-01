@@ -282,13 +282,13 @@ describe("ledger: no interpretation", () => {
 		assert.equal(log.length, 0);
 	});
 
-	it("the budget: a fourth violation in one run goes through (a product choice, measured separately)", async () => {
+	it("a fourth violation still needs the user's approval", async () => {
 		const { pi } = ledger();
 		await pi.user("Don't push.");
 		await pi.callTool("heed_record", { quote: "Don't push", effect: "deny", action: "git_push", scope: "session" });
 		const r = [];
 		for (let i = 0; i < 4; i++) r.push(await blocked(pi, toolCall("bash", { command: "git push" })));
-		assert.deepEqual(r, [true, true, true, false]);
+		assert.deepEqual(r, [true, true, true, true]);
 	});
 });
 
@@ -334,4 +334,3 @@ describe("ledger is the default", () => {
 		assert.match(pi.notes.at(-1)!, /rules from: the model/);
 	});
 });
-

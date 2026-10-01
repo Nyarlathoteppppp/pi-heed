@@ -305,6 +305,23 @@ export class PolicyEngine {
 		);
 	}
 
+	/** A permission already recorded from this user message, including consumed and revoked ones. */
+	permissionFromReceipt(spec: Pick<PolicySpec, "action" | "resource" | "at">): Policy | undefined {
+		return this.policies.find(
+			(p) => p.effect === "ALLOW" && p.action === spec.action && p.provenance.at === spec.at &&
+				(p.resource === spec.resource || covers(p.resource, spec.resource) || covers(spec.resource, p.resource)),
+		);
+	}
+
+	/** Human-dropped rules stay dropped when the model re-reads the original message. */
+	droppedRuleFromReceipt(spec: Pick<PolicySpec, "action" | "resource" | "at">): Policy | undefined {
+		return this.policies.find(
+			(p) => isRestrictive(p) && p.status === "superseded" && p.provenance.endReason?.startsWith("dropped") &&
+				p.action === spec.action && p.provenance.at === spec.at &&
+				(p.resource === spec.resource || covers(p.resource, spec.resource) || covers(spec.resource, p.resource)),
+		);
+	}
+
 	customDenies(): Policy[] {
 		return this.active().filter((p) => p.action === "custom" && p.effect === "DENY");
 	}

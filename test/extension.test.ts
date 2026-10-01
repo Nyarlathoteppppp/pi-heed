@@ -60,13 +60,12 @@ describe("tool-call gate", () => {
 		assert.equal(calls, 0);
 	});
 
-	it("respects the per-run intervention budget", async () => {
+	it("keeps blocking forbidden calls after the advice budget is spent", async () => {
 		const { pi } = track(setup({ config: { mode: "enforce", maxInterventionsPerRun: 2 } }));
 		await pi.user("read-only please");
 		const results = [];
 		for (let i = 0; i < 3; i++) results.push(await pi.emit("tool_call", toolCall("write", { path: `f${i}` })));
-		assert.deepEqual(results.map((r) => r?.block ?? false), [true, true, false]);
-		assert.equal(pi.logs("gate").at(-1).budgetExhausted, true);
+		assert.deepEqual(results.map((r) => r?.block ?? false), [true, true, true]);
 		await pi.emit("agent_start");
 		assert.equal((await pi.emit("tool_call", toolCall("write", { path: "g" })))?.block, true);
 	});

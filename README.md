@@ -8,7 +8,7 @@ Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effect
 
 [![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1-7c5cff)](https://pi.dev)
 [![Jev](https://img.shields.io/badge/powered%20by-TypeSafe%20Jev-f5a524)](https://docs.typesafe.ai)
-[![tests](https://img.shields.io/badge/tests-192%20passing-2ea043)](#development)
+[![tests](https://img.shields.io/badge/tests-204%20passing-2ea043)](#development)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
@@ -169,7 +169,7 @@ Reads (`read`, `grep`, `find`, `ls`, non-mutating shell) are never checked.
 
 ```bash
 export PI_HEED_INFORM=1   # write the active rules into the system prompt (in the live benchmark: half the forbidden attempts, n=5)
-export PI_HEED_BUMP=0.7   # an unsure free-text violation stops the first attempt and asks the model to check with you in chat
+export PI_HEED_BUMP=0.7   # an unsure free-text violation stops for your approval, including retries
 export PI_HEED_ASK=0      # don't ask before blocking (default: ask, 60 s; a number sets the timeout in ms)
 ```
 
@@ -179,6 +179,9 @@ export PI_HEED_ASK=0      # don't ask before blocking (default: ask, 60 s; a num
 drop rule pN*. A rule that has gone stale is hard to remove from the model's side (lifting takes your words and Jev's
 agreement); you can end it with one keypress. No answer within the timeout, Esc, or no UI (print / json mode): the
 block stands and the model is told, as before. `"ask": false` in `~/.pi/agent/pi-heed.json` also turns it off.
+Allowing once applies to the pending call; the rule stays for the next call. Dropping the rule is persisted across
+session reloads. Retrying a rejected call never counts as approval.
+The model cannot restore a dropped rule from the old receipt; you can state it again in a newer message.
 
 ## Safety properties
 
@@ -187,7 +190,8 @@ block stands and the model is told, as before. `"ask": false` in `~/.pi/agent/pi
 - **Never starts a turn.** It blocks a call or annotates a result; it never re-prompts the model. Esc stays Esc.
 - **Asks before it blocks.** You can let a call through or drop the rule; silence blocks.
 - **Stale-proof.** A verdict that lands after you pressed Esc or sent a new prompt is discarded.
-- **Budgeted.** At most 3 interventions per agent run.
+- **Advice is budgeted.** Repeat-failure advice stops after 3 interventions; forbidden calls stay blocked until you allow them, even after that budget is spent.
+- **Receipts are not reusable permissions.** Re-recording a consumed, expired or revoked permission cannot reactivate it. A new user message can grant it again.
 - **Only your words count.** Text injected by extensions (including pi-heed) never becomes a constraint.
 - **Cache-friendly.** No context rewriting; evidence rides on the blocked call or the failing result.
 
@@ -287,7 +291,10 @@ exact words, in a message they typed):
   free-text rule or an `unless` (off until measured: a larger state has cost accuracy before, E12).
   `PI_HEED_TASKS=0` turns the task ledger off.
 
-Not measured live yet.
+A 0.12.1 pilot with `antigravity/gemini-3.8-flash` completed S5, S7, S13 and S15 once each: all tasks finished,
+no violations or false blocks, and the model used `heed_task` in every session. S13 changed from discuss to execute
+at the user's go-ahead. This is a small sample without an off-condition comparison; task context for Jev remains
+off and its effect has not been measured. [Results →](bench/live/README.md)
 
 ## Roadmap
 
@@ -310,7 +317,7 @@ Not measured live yet.
 
 ```bash
 npm install
-npm test                                        # 192 tests, no network
+npm test                                        # 204 tests, no network
 node bench/run.ts --judge replay                # benchmark, offline
 npm run typecheck
 PI_HEED_ENV_FILE=~/.env npm run smoke:jev       # live Jev check
