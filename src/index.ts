@@ -140,6 +140,8 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	if (typeof file.mode === "string") fileEnv.PI_HEED_MODE = file.mode;
 	if (typeof file.inform === "boolean") fileEnv.PI_HEED_INFORM = file.inform ? "1" : "0";
 	if (typeof file.bump === "number") fileEnv.PI_HEED_BUMP = String(file.bump);
+	if (typeof file.ask === "boolean") fileEnv.PI_HEED_ASK = file.ask ? "1" : "0";
+	if (typeof file.ask === "number") fileEnv.PI_HEED_ASK = String(file.ask);
 	const env: NodeJS.ProcessEnv = { ...fileEnv, ...(options.env ?? process.env) };
 	const envMode = env.PI_HEED_MODE as Mode | undefined;
 	const envFlags: Partial<HeedConfig> = {
@@ -147,6 +149,8 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		...(env.PI_HEED_INFORM ? { inform: env.PI_HEED_INFORM === "1" } : {}),
 		...(env.PI_HEED_BUMP ? { bumpProbability: Number(env.PI_HEED_BUMP) || 0 } : {}),
 		...(env.PI_HEED_TASK_CONTEXT ? { taskContext: env.PI_HEED_TASK_CONTEXT === "1" } : {}),
+		// PI_HEED_ASK: 0 off, 1 on (default timeout), or the timeout in ms
+		...(env.PI_HEED_ASK ? { askTimeoutMs: env.PI_HEED_ASK === "1" ? DEFAULT_CONFIG.askTimeoutMs : Math.max(0, Number(env.PI_HEED_ASK) || 0) } : {}),
 	};
 	const config: HeedConfig = { ...DEFAULT_CONFIG, ...envFlags, ...options.config };
 	const transport = options.judge === undefined ? resolveTransport(env) : undefined;
@@ -628,10 +632,49 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		}
 		const res = await pendingDecision;
 		if (!res) return;
-		const block = conclude(res.d, action, ctx, { prejudged, waitedMs: Date.now() - started, stale: myRun !== run || !!ctx.signal?.aborted });
-		if (!block) consume(res.allowIds);
-		return block;
+		const stale = () => myRun !== run || !!ctx.signal?.aborted;
+		const block = conclude(res.d, action, ctx, { prejudged, waitedMs: Date.now() - started, stale: stale() });
+		if (!block) {
+			consume(res.allowIds);
+			return;
+		}
+		const answer = await askHuman(res.d, action, ctx);
+		if (answer === "block" || stale()) return block;
+		// The human let it through: it was not an intervention, and the model never sees a block.
+		interventions = Math.max(0, interventions - 1);
+		let lines: string[] = [];
+		if (answer === "drop" && res.d.policyId) {
+			lines = commit({ kind: "command", at: userMessages.length, ops: [{ op: "supersede", id: res.d.policyId, reason: "dropped by the user when it blocked a call", by: "command" }] });
+		}
+		log({ kind: "gate", acted: false, tool: action.toolName, summary: action.summary, policy: res.d.policyId, verdict: res.d.verdict, note: answer === "drop" ? `user allowed, dropped ${res.d.policyId}` : "user allowed once", constraints: lines.length ? lines : undefined });
+		status(ctx, answer === "drop" ? `dropped ${res.d.policyId}` : `allowed ${action.toolName}`);
+		consume(res.allowIds);
+		return;
 	});
+
+	/**
+	 * Before a block: ask the human, who knows whether the rule is still meant. Rules go stale and the model can't
+	 * always tell (lifting one takes the user's words and Jev's agreement); the human can, in one keypress.
+	 * No UI, no answer in time, Esc or an error: the block stands.
+	 */
+	async function askHuman(d: Decision, action: ToolAction, ctx: ExtensionContext): Promise<"block" | "once" | "drop"> {
+		if (config.askTimeoutMs <= 0 || !ctx.hasUI || typeof ctx.ui?.select !== "function") return "block";
+		const p = d.policyId ? engine.get(d.policyId) : undefined;
+		const rule = p ? `${p.id} "${truncate(p.sourceQuote, 120)}"` : truncate(d.verdict?.evidence ?? "", 200);
+		const options = { block: "Block it (tell the agent)", once: "Allow this call once", drop: p ? `Allow, and drop rule ${p.id}` : undefined };
+		try {
+			const choice = await ctx.ui.select(
+				`pi-heed: ${truncate(action.summary, 120)}\nbreaks your rule ${rule}`,
+				Object.values(options).filter((o): o is string => !!o),
+				{ timeout: config.askTimeoutMs, signal: ctx.signal },
+			);
+			if (choice === options.once) return "once";
+			if (choice && choice === options.drop) return "drop";
+		} catch {
+			// a failed dialog is a no
+		}
+		return "block";
+	}
 
 	pi.on("tool_result", (event, ctx) => {
 		if (config.mode === "off") return;

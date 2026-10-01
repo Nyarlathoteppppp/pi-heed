@@ -32,6 +32,8 @@ export class FakePi {
 	tools: Array<{ name: string; description: string }> = [];
 	/** tools an extension registered for the model (heed_record / heed_lift) */
 	registered = new Map<string, any>();
+	/** The human's answer to pi's select dialog; unset: the UI has no dialogs (like the older tests). */
+	dialog?: (title: string, options: string[], opts?: { timeout?: number; signal?: AbortSignal }) => Promise<string | undefined>;
 	private seq = 0;
 
 	api(): ExtensionAPI {
@@ -72,6 +74,7 @@ export class FakePi {
 			ui: {
 				setStatus: (_k: string, v: string | undefined) => (this.status = v),
 				notify: (m: string) => this.notes.push(m),
+				...(this.dialog ? { select: this.dialog } : {}),
 			},
 			sessionManager: { getBranch: () => this.entries },
 		};
