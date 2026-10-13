@@ -6,9 +6,9 @@
 
 Runtime constraints for the [pi](https://pi.dev) coding agent: every side-effecting tool call is checked against what you said, before it runs.
 
-[![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1-7c5cff)](https://pi.dev)
+[![pi](https://img.shields.io/badge/pi-%E2%89%A50.85.1%20%C2%B7%20tested%201.1.0-7c5cff)](https://pi.dev)
 [![Jev](https://img.shields.io/badge/powered%20by-TypeSafe%20Jev-f5a524)](https://docs.typesafe.ai)
-[![tests](https://img.shields.io/badge/tests-204%20passing-2ea043)](#development)
+[![tests](https://img.shields.io/badge/tests-206%20passing-2ea043)](#development)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 </div>
@@ -182,6 +182,14 @@ block stands and the model is told, as before. `"ask": false` in `~/.pi/agent/pi
 Allowing once applies to the pending call; the rule stays for the next call. Dropping the rule is persisted across
 session reloads. Retrying a rejected call never counts as approval.
 The model cannot restore a dropped rule from the old receipt; you can state it again in a newer message.
+Dropping one rule does not let the call past another that still applies (read-only *and* "don't touch the tests"
+on a test file): pi-heed decides again and asks about that one. The dialog title is one line with your own words,
+so pi-web shows it whole.
+
+Checked end to end in a real pi over RPC (the protocol pi-web uses), with gemini-3.8-flash: each of the three
+answers did what it says (file unchanged and rule kept / file changed and rule kept / file changed and rule
+dropped). `node bench/live/ask-rpc.ts` repeats it; it loads only pi-heed and the model's provider, and deletes its
+sandbox afterwards.
 
 ## Safety properties
 
@@ -317,7 +325,7 @@ off and its effect has not been measured. [Results →](bench/live/README.md)
 
 ```bash
 npm install
-npm test                                        # 204 tests, no network
+npm test                                        # 206 tests, no network
 node bench/run.ts --judge replay                # benchmark, offline
 npm run typecheck
 PI_HEED_ENV_FILE=~/.env npm run smoke:jev       # live Jev check

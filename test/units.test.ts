@@ -239,12 +239,13 @@ describe("rules: a pasted task spec is not a list of tool bans (real session, E1
 });
 
 describe("settings file for pi started outside a shell", () => {
-	it("reads ~/.pi/agent/pi-heed.json-style files and ignores broken ones", async () => {
-		const { mkdtempSync, writeFileSync } = await import("node:fs");
+	it("reads ~/.pi/agent/pi-heed.json-style files and ignores broken ones", async (t) => {
+		const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
 		const { join } = await import("node:path");
 		const { tmpdir } = await import("node:os");
 		const { readSettingsFile } = await import("../src/index.ts");
 		const d = mkdtempSync(join(tmpdir(), "heed-"));
+		t.after(() => rmSync(d, { recursive: true, force: true }));
 		writeFileSync(join(d, "ok.json"), JSON.stringify({ envFile: "~/x/.env", mode: "enforce" }));
 		writeFileSync(join(d, "bad.json"), "{not json");
 		assert.deepEqual(readSettingsFile(join(d, "ok.json")), { envFile: "~/x/.env", mode: "enforce" });
@@ -254,10 +255,11 @@ describe("settings file for pi started outside a shell", () => {
 });
 
 describe("indirect writes: package scripts and script files", () => {
-	it("reads package.json scripts and script files in the working directory", async () => {
-		const { mkdtempSync, writeFileSync } = await import("node:fs");
+	it("reads package.json scripts and script files in the working directory", async (t) => {
+		const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
 		const { tmpdir } = await import("node:os");
 		const dir = mkdtempSync(`${tmpdir()}/heed-`);
+		t.after(() => rmSync(dir, { recursive: true, force: true }));
 		writeFileSync(`${dir}/package.json`, JSON.stringify({ scripts: { check: "tsc --noEmit", fmt2: "prettier --write src", gen: "node scripts/gen.js", show: "node scripts/show.js" } }));
 		const { mkdirSync } = await import("node:fs");
 		mkdirSync(`${dir}/scripts`);

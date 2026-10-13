@@ -74,6 +74,8 @@ interface Decision {
 }
 
 const MODES: Mode[] = ["off", "shadow", "enforce"];
+/** At most this many rules are asked about for one call (one dialog per rule that applies). */
+const MAX_ASK_ROUNDS = 8;
 export type Pipeline = "interpret" | "ledger" | "ledger+regex";
 const PIPELINES: Pipeline[] = ["interpret", "ledger", "ledger+regex"];
 const MODE_HELP: Record<Mode, string> = { off: "do nothing", shadow: "decide and log, never block", enforce: "block calls that break your rules" };
@@ -626,26 +628,36 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 			});
 			return;
 		}
-		const res = await pendingDecision;
-		if (!res) return;
+		const first = await pendingDecision;
+		if (!first) return;
 		const stale = () => myRun !== run || !!ctx.signal?.aborted;
-		const block = conclude(res.d, action, ctx, { prejudged, waitedMs: Date.now() - started, stale: stale() });
-		if (!block) {
-			consume(res.allowIds);
-			return;
+		let res = first;
+		// Dropping the rule that blocked does not clear the call: another rule may still apply ("只读" and "别动测试"
+		// both cover a test file). Decide again after each drop; each rule that applies is asked about once.
+		for (let round = 0; round < MAX_ASK_ROUNDS; round++) {
+			const block = conclude(res.d, action, ctx, { prejudged, waitedMs: Date.now() - started, stale: stale() });
+			if (!block) {
+				consume(res.allowIds);
+				return;
+			}
+			// A retry after "Block it" is asked about again: the human may have changed their mind (a false block).
+			const answer = await askHuman(res.d, action, ctx);
+			if (answer === "block" || stale()) return block;
+			// The human let it through: it was not an intervention, and the model never sees a block.
+			interventions = Math.max(0, interventions - 1);
+			let lines: string[] = [];
+			if (answer === "drop" && res.d.policyId) {
+				lines = commit({ kind: "command", at: userMessages.length, ops: [{ op: "supersede", id: res.d.policyId, reason: "dropped by the user when it blocked a call", by: "command" }] });
+			}
+			log({ kind: "gate", acted: false, tool: action.toolName, summary: action.summary, policy: res.d.policyId, verdict: res.d.verdict, note: answer === "drop" ? `user allowed, dropped ${res.d.policyId}` : "user allowed once", constraints: lines.length ? lines : undefined });
+			status(ctx, answer === "drop" ? `dropped ${res.d.policyId}` : `allowed ${action.toolName}`);
+			if (answer === "once") {
+				consume(res.allowIds);
+				return;
+			}
+			res = { d: await decide(action, input, ctx.signal), allowIds: engine.resolve(action, satisfied, cwd).allowIds };
 		}
-		const answer = await askHuman(res.d, action, ctx);
-		if (answer === "block" || stale()) return block;
-		// The human let it through: it was not an intervention, and the model never sees a block.
-		interventions = Math.max(0, interventions - 1);
-		let lines: string[] = [];
-		if (answer === "drop" && res.d.policyId) {
-			lines = commit({ kind: "command", at: userMessages.length, ops: [{ op: "supersede", id: res.d.policyId, reason: "dropped by the user when it blocked a call", by: "command" }] });
-		}
-		log({ kind: "gate", acted: false, tool: action.toolName, summary: action.summary, policy: res.d.policyId, verdict: res.d.verdict, note: answer === "drop" ? `user allowed, dropped ${res.d.policyId}` : "user allowed once", constraints: lines.length ? lines : undefined });
-		status(ctx, answer === "drop" ? `dropped ${res.d.policyId}` : `allowed ${action.toolName}`);
-		consume(res.allowIds);
-		return;
+		return { block: true, reason: "[pi-heed] Too many of the user's rules apply to this call; ask the user." };
 	});
 
 	/**
@@ -656,11 +668,12 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	async function askHuman(d: Decision, action: ToolAction, ctx: ExtensionContext): Promise<"block" | "once" | "drop"> {
 		if (config.askTimeoutMs <= 0 || !ctx.hasUI || typeof ctx.ui?.select !== "function") return "block";
 		const p = d.policyId ? engine.get(d.policyId) : undefined;
-		const rule = p ? `${p.id} "${truncate(p.sourceQuote, 120)}"` : truncate(d.verdict?.evidence ?? "", 200);
+		// One short line: pi-web shows a dialog title on one line, and the user's own words are what matters.
+		const rule = p ? `${p.id} "${truncate(p.sourceQuote.replace(/\s+/g, " "), 50)}"` : "a rule you set";
 		const options = { block: "Block it (tell the agent)", once: "Allow this call once", drop: p ? `Allow, and drop rule ${p.id}` : undefined };
 		try {
 			const choice = await ctx.ui.select(
-				`pi-heed: ${truncate(action.summary, 120)}\nbreaks your rule ${rule}`,
+				`pi-heed: ${truncate(action.summary, 60)} — breaks ${rule}`,
 				Object.values(options).filter((o): o is string => !!o),
 				{ timeout: config.askTimeoutMs, signal: ctx.signal },
 			);

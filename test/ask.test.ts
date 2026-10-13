@@ -170,4 +170,35 @@ describe("ask the human before blocking", () => {
 		assert.equal(await gate(pi, toolCall("bash", { command: "curl https://api.prod.example.com" })), undefined);
 		assert.deepEqual(options, ["Block it (tell the agent)", "Allow this call once"]);
 	});
+
+	it("dropping the rule that blocked does not wave the call past another rule that applies", async () => {
+		const { pi, heed } = ledger();
+		await pi.user("只读");
+		await pi.callTool("heed_record", { quote: "只读", effect: "deny", action: "modify", target: "*", scope: "session" });
+		await pi.emit("agent_end");
+		await pi.user("别动测试");
+		await pi.callTool("heed_record", { quote: "别动测试", effect: "deny", action: "modify", target: "tests", scope: "session" });
+		const titles: string[] = [];
+		// drop whatever is asked about first, then block the next one
+		pi.dialog = async (t, o) => (titles.push(t), titles.length === 1 ? o[2] : o[0]);
+		assert.equal((await gate(pi, edit("test/a.test.ts")))?.block, true, "read-only still applies");
+		assert.equal(titles.length, 2);
+		assert.match(titles[0], /别动测试/, "the most specific rule first");
+		assert.match(titles[1], /只读/);
+		assert.equal(heed.engine.get("p2")!.status, "superseded");
+		assert.equal(heed.engine.get("p1")!.status, "active");
+	});
+
+	it("the title is one short line that keeps the user's words", async () => {
+		const s = ledger();
+		const said = "测试文件先别动，这些测试是验收用的，客户会逐条核对每一个断言，所以千万不要改任何一个字";
+		await s.pi.user(said);
+		await s.pi.callTool("heed_record", { quote: said, effect: "deny", action: "modify", target: "tests", scope: "session" });
+		let title = "";
+		s.pi.dialog = async (t, o) => ((title = t), o[0]);
+		await gate(s.pi, toolCall("bash", { command: "sed -i 's/toBe(3)/toBe(4)/' test/very/long/path/to/some/deeply/nested/checkout.integration.test.ts" }));
+		assert.ok(!title.includes("\n"), "one line");
+		assert.ok(title.length <= 140, `short: ${title.length}`);
+		assert.match(title, /测试文件先别动/);
+	});
 });
