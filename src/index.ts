@@ -728,6 +728,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
                 ![...pending.values()].some(other => other.mutates)) testsOkEpoch = repeat.epoch;
             return;
         }
+        if (started?.epoch === repeat.epoch) testsOkEpoch = -1;
 		if (event.toolName !== "bash") return;
 		const evidence = repeat.recordFailure(String((event.input as Record<string, unknown>).command ?? ""), textOf(event.content));
 		if (!evidence) return;
