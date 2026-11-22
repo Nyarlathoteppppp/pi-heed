@@ -35,11 +35,14 @@ const GIT_PREFIX = String.raw`\bgit(?:\s+(?:-C|-c)\s+\S+|\s+--(?:git-dir|work-tr
 const GIT_PUSH = new RegExp(GIT_PREFIX + String.raw`push\b`);
 const GIT_COMMIT = new RegExp(GIT_PREFIX + String.raw`commit\b`);
 const RUNS_TESTS = /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|\b(?:pytest|jest|vitest|mocha|rspec|phpunit)\b|\bgo\s+test\b|\bcargo\s+test\b|\bmake\s+test\b|\bnode\s+--test\b|\bpython3?\s+-m\s+(?:pytest|unittest)\b/;
+// Match the full invocation so collection, listing, and help modes don't issue a receipt.
+const WRAPPED_TEST_RUN = /^(?:uv\s+run\s+pytest|npx\s+vitest\s+run)$/;
 
 /** Test receipts are valid only when a command's exit code represents its test suite. */
 export function credibleTestCommand(command: string): boolean {
     const code = withoutLiterals(command).trim();
     if (/[|;&\r\n]/.test(code)) return false;
+    if (WRAPPED_TEST_RUN.test(code)) return true;
     const match = RUNS_TESTS.exec(code);
     return !!match && match.index === 0;
 }
