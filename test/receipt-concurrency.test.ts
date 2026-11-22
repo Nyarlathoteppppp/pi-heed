@@ -26,7 +26,7 @@ describe("test receipts and concurrent writes", () => {
         const clean = toolCall("bash", { command: "npm test" });
         await pi.emit("tool_call", clean);
         await pi.emit("tool_result", { ...clean, isError: false, content: [] });
-        assert.equal((await pi.emit("tool_call", toolCall("bash", { command: "git push" })))?.block, false);
+        assert.equal((await pi.emit("tool_call", toolCall("bash", { command: "git push" })))?.block ?? false, false);
     });
     it("a failed mutating tool invalidates an earlier test receipt", async () => {
         const { pi } = setup({ judge: null, env: { PI_HEED_MODE: "enforce" } });
