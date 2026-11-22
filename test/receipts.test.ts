@@ -90,3 +90,15 @@ describe("permission receipts cannot be replayed", () => {
 		assert.equal(await edit(pi), true);
 	});
 });
+
+describe("once permission concurrency", () => {
+    it("parallel edits can consume a once permission only once", async () => {
+        const { pi } = await permitted();
+        const calls = await Promise.all([
+            pi.emit("tool_call", toolCall("edit", { path: "package.json" })),
+            pi.emit("tool_call", toolCall("edit", { path: "package.json" })),
+        ]);
+        assert.equal(calls.filter(r => !r?.block).length, 1);
+        assert.equal(calls.filter(r => r?.block).length, 1);
+    });
+});

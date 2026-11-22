@@ -173,6 +173,9 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	/** Indexes of user-role messages another extension injected: never parsed, never evidence. */
 	const injected = new Set<number>();
 	const pending = new Map<string, ToolAction>();
+    const testStarts = new Map<string, { epoch: number; clean: boolean }>();
+    // A once-permission must not be consumed by parallel tool calls.
+    let onceGate: Promise<void> = Promise.resolve();
 	const speculative = new Map<string, { inputKey: string; decision: Promise<Decision | undefined>; early: boolean; path?: string }>();
 	const memo = new Map<string, Promise<Decision>>();
 	/** Per free-text policy: tools Jev is confident cannot break it. Asked once, in one request, per policy. */
@@ -224,6 +227,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		tasks.reset();
 		repeat.reset();
 		pending.clear();
+        testStarts.clear();
 		speculative.clear();
 		memo.clear();
 		relevance.clear();
@@ -546,6 +550,7 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 
 	pi.on("agent_end", (_e, ctx) => {
 		pending.clear();
+        testStarts.clear();
 		speculative.clear();
 		const lines = commit({ kind: "end", at: userMessages.length - 1, ops: engine.active().some((p) => p.scope === "run") ? [{ op: "end", scope: "run" }] : [] });
 		if (lines.length && config.mode !== "off") {
@@ -594,11 +599,23 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
-		if (config.mode === "off") return;
+        if (config.mode === "off") return;
+        let release: (() => void) | undefined;
+        const onceActive = engine.active().some(p => p.effect === "ALLOW" && p.scope === "once");
+        if (onceActive) {
+            const previous = onceGate;
+            onceGate = new Promise<void>(resolve => { release = resolve; });
+            await previous;
+        }
+        try {
 		cwd = ctx.cwd ?? cwd;
 		const input = event.input as Record<string, unknown>;
 		const action = classify(event.toolName, input, cwd);
 		pending.set(event.toolCallId, action);
+        if (action.runsTests) testStarts.set(event.toolCallId, {
+            epoch: repeat.epoch,
+            clean: ![...pending].some(([id, other]) => id !== event.toolCallId && other.mutates),
+        });
 		if (!checkable(action)) return;
 
 		const started = Date.now();
@@ -621,13 +638,17 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 
 		// Shadow mode never blocks, so it never makes the tool wait: decide and log in the background.
 		if (config.mode === "shadow") {
-			pendingDecision.then((res) => {
-				if (!res) return;
-				conclude(res.d, action, ctx, { prejudged, waitedMs: 0, stale: myRun !== run });
-				consume(res.allowIds);
-			});
-			return;
-		}
+            if (action.mutates) testsOkEpoch = -1;
+            const finish = (res: { d: Decision; allowIds: string[] } | undefined) => {
+                if (!res) return;
+                conclude(res.d, action, ctx, { prejudged, waitedMs: 0, stale: myRun !== run });
+                consume(res.allowIds);
+            };
+            // Normally asynchronous; only one-shot grants need sequential consumption.
+            if (onceActive) finish(await pendingDecision);
+            else void pendingDecision.then(finish);
+            return;
+        }
 		const first = await pendingDecision;
 		if (!first) return;
 		const stale = () => myRun !== run || !!ctx.signal?.aborted;
@@ -637,12 +658,17 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 		for (let round = 0; round < MAX_ASK_ROUNDS; round++) {
 			const block = conclude(res.d, action, ctx, { prejudged, waitedMs: Date.now() - started, stale: stale() });
 			if (!block) {
+                if (action.mutates) testsOkEpoch = -1;
 				consume(res.allowIds);
 				return;
 			}
 			// A retry after "Block it" is asked about again: the human may have changed their mind (a false block).
 			const answer = await askHuman(res.d, action, ctx);
-			if (answer === "block" || stale()) return block;
+			if (answer === "block" || stale()) {
+                pending.delete(event.toolCallId);
+                testStarts.delete(event.toolCallId);
+                return block;
+            }
 			// The human let it through: it was not an intervention, and the model never sees a block.
 			interventions = Math.max(0, interventions - 1);
 			let lines: string[] = [];
@@ -652,12 +678,16 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 			log({ kind: "gate", acted: false, tool: action.toolName, summary: action.summary, policy: res.d.policyId, verdict: res.d.verdict, note: answer === "drop" ? `user allowed, dropped ${res.d.policyId}` : "user allowed once", constraints: lines.length ? lines : undefined });
 			status(ctx, answer === "drop" ? `dropped ${res.d.policyId}` : `allowed ${action.toolName}`);
 			if (answer === "once") {
+                if (action.mutates) testsOkEpoch = -1;
 				consume(res.allowIds);
 				return;
 			}
 			res = { d: await decide(action, input, ctx.signal), allowIds: engine.resolve(action, satisfied, cwd).allowIds };
 		}
-		return { block: true, reason: "[pi-heed] Too many of the user's rules apply to this call; ask the user." };
+		pending.delete(event.toolCallId);
+        testStarts.delete(event.toolCallId);
+        return { block: true, reason: "[pi-heed] Too many of the user's rules apply to this call; ask the user." };
+        } finally { release?.(); }
 	});
 
 	/**
@@ -688,12 +718,16 @@ export function createHeed(pi: ExtensionAPI, options: HeedOptions = {}) {
 	pi.on("tool_result", (event, ctx) => {
 		if (config.mode === "off") return;
 		const action = pending.get(event.toolCallId);
-		pending.delete(event.toolCallId);
-		if (!event.isError) {
-			if (action?.mutates) repeat.markChange();
-			if (action?.runsTests) testsOkEpoch = repeat.epoch;
-			return;
-		}
+        const started = testStarts.get(event.toolCallId);
+        pending.delete(event.toolCallId);
+        testStarts.delete(event.toolCallId);
+        // Even a failing write can partially modify files; discard previous test evidence.
+        if (action?.mutates) { repeat.markChange(); testsOkEpoch = -1; }
+        if (!event.isError) {
+            if (action?.runsTests && started?.clean && started.epoch === repeat.epoch &&
+                ![...pending.values()].some(other => other.mutates)) testsOkEpoch = repeat.epoch;
+            return;
+        }
 		if (event.toolName !== "bash") return;
 		const evidence = repeat.recordFailure(String((event.input as Record<string, unknown>).command ?? ""), textOf(event.content));
 		if (!evidence) return;
