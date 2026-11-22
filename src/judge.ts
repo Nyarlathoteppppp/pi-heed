@@ -76,6 +76,7 @@ export function resolveTransport(env: NodeJS.ProcessEnv = process.env): Transpor
 
 const finite = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x);
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
+const bounded = (x: unknown): x is number => finite(x) && x >= -0.000001 && x <= 1.000001;
 
 /**
  * Validates an answer and clamps minor numeric overshoot into [0, 1]; anything non-finite or off-schema is
@@ -83,11 +84,13 @@ const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
  */
 function normalizeAnswer(q: Question, a: any): Answer | undefined {
 	if (!a || typeof a !== "object") return undefined;
-	if (q.type === "noul") return finite(a.noul) ? { type: "noul", noul: clamp01(a.noul) } : undefined;
-	if (typeof a.choice !== "string" || !(a.choice in q.criteria) || !finite(a.confidence) || !a.probabilities || typeof a.probabilities !== "object") return undefined;
+	if (q.type === "noul") return bounded(a.noul) ? { type: "noul", noul: clamp01(a.noul) } : undefined;
+	if (typeof a.choice !== "string" || !Object.hasOwn(q.criteria, a.choice) || !bounded(a.confidence) ||
+        !a.probabilities || typeof a.probabilities !== "object" || Array.isArray(a.probabilities) ||
+        !Object.hasOwn(a.probabilities, a.choice)) return undefined;
 	const probabilities: Record<string, number> = {};
 	for (const [k, v] of Object.entries(a.probabilities)) {
-		if (!finite(v)) return undefined;
+		if (!bounded(v)) return undefined;
 		probabilities[k] = clamp01(v);
 	}
 	return { type: "choice", choice: a.choice, probabilities, confidence: clamp01(a.confidence) };
@@ -181,7 +184,12 @@ export async function ask(
 	if (outer?.aborted) onOuter();
 	outer?.addEventListener("abort", onOuter, { once: true });
 	try {
-		const answers = await judge.decide(state, questions, controller.signal);
+		// Abort is cooperative; a broken judge that ignores it must not stall a tool call.
+        if (controller.signal.aborted) throw controller.signal.reason;
+        const aborted = new Promise<never>((_resolve, reject) =>
+            controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true }));
+        const answers = await Promise.race([judge.decide(state, questions, controller.signal), aborted]);
+        if (controller.signal.aborted) throw controller.signal.reason;
 		return { answers, ms: Date.now() - started };
 	} catch (e) {
 		const reason = controller.signal.aborted ? String((controller.signal.reason as Error)?.message ?? "aborted") : String((e as Error)?.message ?? e);
