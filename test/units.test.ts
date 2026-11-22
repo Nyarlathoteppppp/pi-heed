@@ -283,3 +283,38 @@ describe("parser: a sentence ending in 'package.' (live S11)", () => {
 		assert.deepEqual(ops.map((o: any) => [o.spec.effect, o.spec.action]), [["REQUIRE_CONFIRMATION", "install_deps"]]);
 	});
 });
+
+describe("security-sensitive classification regressions", () => {
+    const bash = (command: string) => classify("bash", { command });
+    it("recognizes git global flags before push and commit", () => {
+        for (const command of ["git -C ./repo push origin main", "git -c user.name=test commit -m update", "git --git-dir=.git push"]) {
+            const action = bash(command);
+            assert.equal(action.mutates, true, command);
+            assert.equal(action.gitPush || action.gitCommit, true, command);
+        }
+    });
+    it("never accepts inert or masked test commands as receipts", () => {
+        for (const command of ['echo "npm test"', "printf 'npm test'", "npm test || true", "npm test | cat", "npm test; true", "node -e 'console.log(\"npm test\")'"]) {
+            assert.equal(bash(command).runsTests, false, command);
+        }
+        assert.equal(bash("npm test").runsTests, true);
+        assert.equal(bash("node --test test/unit.test.ts").runsTests, true);
+    });
+    it("normalizes traversals before checking protected paths", () => {
+        assert.equal(pathMatches("safe/../secret.txt", "safe"), false);
+        assert.equal(pathMatches("safe/../secret.txt", "secret.txt"), true);
+    });
+    it("rejects grossly invalid probabilities", async () => {
+        const q = { q: { type: "choice" as const, instructions: "?", criteria: { yes: "", no: "" } } };
+        const judge = new JevJudge({ url: "https://example.org", model: "test", key: "test" },
+            (async () => new Response(JSON.stringify({ answers: { q: { type: "choice", choice: "yes", confidence: 1.4, probabilities: { yes: 3 } } } }))) as typeof fetch);
+        await assert.rejects(judge.decide({}, q, new AbortController().signal), /malformed/);
+    });
+    it("times out even when a judge ignores abort signals", async () => {
+        const unresponsive: Judge = { name: "unresponsive", decide: async () => await new Promise<Record<string, Answer>>(() => {}) };
+        const start = performance.now();
+        const outcome = await ask(unresponsive, {}, { q: { type: "noul", instructions: "?" } }, 25);
+        assert.equal(outcome.error, "timeout");
+        assert.ok(performance.now() - start < 600);
+    });
+});

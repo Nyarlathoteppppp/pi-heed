@@ -14,7 +14,7 @@ const MUTATING_BASH: RegExp[] = [
 	/\bsed\s+(?:-[a-zA-Z]*i|--in-place)/,
 	/\bfind\b.*\s-(?:delete\b|exec(?:dir)?\s+(?:rm|mv|cp|chmod|chown|sed|perl|truncate|tee)\b)/,
 	/\bperl\s+-[a-zA-Z]*i/,
-	/\bgit\s+(?:commit|push|reset|checkout|switch|merge|rebase|apply|am|stash|add|rm|mv|restore|clean|cherry-pick|revert|tag|branch\s+-[dDmM])\b/,
+	/\bgit(?:\s+(?:-C|-c)\s+\S+|\s+--(?:git-dir|work-tree)(?:=\S+|\s+\S+))*\s+(?:commit|push|reset|checkout|switch|merge|rebase|apply|am|stash|add|rm|mv|restore|clean|cherry-pick|revert|tag|branch\s+-[dDmM])\b/,
 	/\b(?:npm|pnpm|yarn|bun)\s+(?:install|i|add|remove|rm|uninstall|update|upgrade|link|publish)\b/,
 	/\b(?:pip3?|uv\s+pip|poetry|pipenv)\s+(?:install|uninstall|add|remove)\b/,
 	/\buv\s+(?:add|remove|sync)\b/,
@@ -31,9 +31,18 @@ const DEP_INSTALL: RegExp[] = [
 	/\b(?:cargo\s+add|go\s+get|gem\s+install|brew\s+install|apt(?:-get)?\s+install)\b/,
 ];
 
-const GIT_PUSH = /\bgit\s+push\b/;
-const GIT_COMMIT = /\bgit\s+commit\b/;
+const GIT_PREFIX = String.raw`\bgit(?:\s+(?:-C|-c)\s+\S+|\s+--(?:git-dir|work-tree)(?:=\S+|\s+\S+))*\s+`;
+const GIT_PUSH = new RegExp(GIT_PREFIX + String.raw`push\b`);
+const GIT_COMMIT = new RegExp(GIT_PREFIX + String.raw`commit\b`);
 const RUNS_TESTS = /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|\b(?:pytest|jest|vitest|mocha|rspec|phpunit)\b|\bgo\s+test\b|\bcargo\s+test\b|\bmake\s+test\b|\bnode\s+--test\b|\bpython3?\s+-m\s+(?:pytest|unittest)\b/;
+
+/** Test receipts are valid only when a command's exit code represents its test suite. */
+export function credibleTestCommand(command: string): boolean {
+    const code = withoutLiterals(command).trim();
+    if (/[|;&\r\n]/.test(code)) return false;
+    const match = RUNS_TESTS.exec(code);
+    return !!match && match.index === 0;
+}
 
 const INTERPRETER = String.raw`\b(?:python3?|node|ruby|perl|bun|deno)\b`;
 // Commands that can act on other systems or run arbitrary code. Test runs and plain reads are not in it.
@@ -155,6 +164,7 @@ export function classify(toolName: string, input: Record<string, unknown>, cwd?:
 		const mutates = direct || indirect;
 		const ops = withoutLiterals(command);
 		const installsDeps = DEP_INSTALL.some((re) => re.test(ops));
+		const runsTests = credibleTestCommand(command);
 		// an indirect write goes wherever the tool decides: judge it on every path it mentions
 		const writes = direct && !installsDeps ? writtenPaths(shell) : undefined;
 		return {
@@ -164,10 +174,10 @@ export function classify(toolName: string, input: Record<string, unknown>, cwd?:
 			installsDeps,
 			gitPush: GIT_PUSH.test(ops),
 			gitCommit: GIT_COMMIT.test(ops),
-			runsTests: RUNS_TESTS.test(command),
+			runsTests,
 			paths: extractPaths(command),
 			...(writes && !code.length ? { writes } : {}),
-			reachesOut: REACHES_OUT.test(command) && !RUNS_TESTS.test(command),
+			reachesOut: REACHES_OUT.test(command) && !runsTests,
 			summary: `bash: ${truncate(command, 200)}`,
 		};
 	}

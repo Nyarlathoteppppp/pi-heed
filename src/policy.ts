@@ -1,4 +1,4 @@
-import { basename, matchesGlob } from "node:path";
+import { basename, matchesGlob, normalize, resolve, sep } from "node:path";
 import { TEST_PATH } from "./actions.ts";
 import type { ToolAction } from "./types.ts";
 
@@ -101,7 +101,7 @@ export function isRestrictive(p: Policy): boolean {
 }
 
 function normPath(p: string): string {
-	return p.replace(/^\.\//, "").replace(/\/$/, "");
+	return normalize(p).replace(/^\.\//, "").replace(/\/$/, "");
 }
 
 /**
@@ -138,10 +138,14 @@ const TEMP_ROOTS = ["/tmp/", "/private/tmp/", "/var/folders/", "/private/var/fol
  * The project itself may live under /tmp, so the working directory always wins.
  */
 export function isScratch(path: string, cwd?: string): boolean {
-	if (!path.startsWith("/")) return false;
-	const roots = [...TEMP_ROOTS, ...(process.env.TMPDIR ? [process.env.TMPDIR.replace(/\/?$/, "/")] : [])];
-	if (!roots.some((r) => path.startsWith(r))) return false;
-	return !(cwd && (path === cwd || path.startsWith(cwd.replace(/\/?$/, "/"))));
+    if (!path.startsWith("/")) return false;
+    // Check canonical paths: /tmp/../project must not inherit scratch exemption.
+    const absolute = resolve(path);
+    const roots = [...TEMP_ROOTS, ...(process.env.TMPDIR ? [process.env.TMPDIR.replace(/\/?$/, "/")] : [])];
+    if (!roots.some(root => absolute.startsWith(resolve(root) + sep))) return false;
+    if (!cwd) return true;
+    const project = resolve(cwd);
+    return absolute !== project && !absolute.startsWith(project + sep);
 }
 
 function actionSpecificity(a: PolicyAction): number {
