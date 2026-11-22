@@ -4,7 +4,7 @@ import { classify } from "../src/actions.ts";
 import { pathMatches, PolicyEngine } from "../src/policy.ts";
 import { parseMessage } from "../src/rules.ts";
 import { kinds as kindsOf } from "./harness.ts";
-import { ask, JevJudge } from "../src/judge.ts";
+import { ask, JevJudge, type Answer, type Judge } from "../src/judge.ts";
 import { errorSignature, RepeatTracker } from "../src/repeat.ts";
 
 /** Feeds messages through the parser into a fresh engine, like the extension does. */
